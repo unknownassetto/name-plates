@@ -1,0 +1,624 @@
+-- Steam Avatar Nameplate for Assetto Corsa
+-- Shows Steam avatars above players with input icons underneath
+-- Place this in: assettocorsa/extension/lua/steam_avatar_nameplate.lua
+
+-- ====================
+-- STEAM AVATAR SYSTEM
+-- ====================
+
+-- Avatar state management
+local avatarState = {
+    avatars = {},  -- Table to store active avatars by steamId
+    maxAvatars = 20,
+    avatarSize = 48,  -- Size for nameplate avatars
+    persistentAvatars = {},  -- Cache avatars even after disconnection
+    playerNameMap = {},  -- Map player names to Steam IDs
+    lastConnectionCheck = 0,
+}
+
+-- Initialization state for avatar system
+local avatarInitState = {
+    isReady = false,
+    startTime = os.clock(),
+    readyDelay = 1.0,
+    forceReady = false,
+}
+
+-- Input mode tracking
+local driverData = {}
+local serverInputModes = {} -- Store server input mode data
+local lastBroadcastReceived = 0
+
+-- Avatar data structure
+local function createAvatar(steamId, playerName, avatarUrl, displayTime)
+    return {
+        steamId = steamId,
+        playerName = playerName,
+        avatarUrl = avatarUrl,
+        displayTime = displayTime,
+        image = nil,
+        imageLoaded = false,
+        createdAt = os.clock(),
+        alpha = 1.0,
+        fadeState = "visible",
+        visible = true,
+        lastUpdate = os.clock(),
+    }
+end
+
+-- Check if avatar script is ready
+function isAvatarScriptReady()
+    if avatarInitState.forceReady then
+        return true
+    end
+    
+    if not avatarInitState.isReady then
+        if os.clock() - avatarInitState.startTime >= avatarInitState.readyDelay then
+            avatarInitState.isReady = true
+            ac.log("Steam Avatar Nameplate: ✅ Avatar system is now ready")
+        else
+            return false
+        end
+    end
+    return true
+end
+
+-- Parse Steam Avatar data from chat message
+function parseSteamAvatarData(message)
+    if not message or not message:find("%$STEAM_AVATAR%$") then
+        return nil
+    end
+    
+    local avatarDataString = message:gsub("%$STEAM_AVATAR%$", "")
+    local parts = {}
+    for part in avatarDataString:gmatch("[^$]+") do
+        table.insert(parts, part)
+    end
+    
+    if #parts >= 4 then
+        return {
+            steamId = parts[1],
+            playerName = parts[2],
+            avatarUrl = parts[3],
+            displayTime = tonumber(parts[4]) or 5.0
+        }
+    end
+    return nil
+end
+
+-- Parse Steam Avatar removal message
+function parseSteamAvatarRemoval(message)
+    if not message or not message:find("%$STEAM_AVATAR_REMOVE%$") then
+        return nil
+    end
+    
+    local removalDataString = message:gsub("%$STEAM_AVATAR_REMOVE%$", "")
+    local parts = {}
+    for part in removalDataString:gmatch("[^$]+") do
+        table.insert(parts, part)
+    end
+    
+    if #parts >= 2 then
+        return {
+            steamId = parts[1],
+            playerName = parts[2]
+        }
+    end
+    return nil
+end
+
+-- Download avatar image
+function downloadAvatarImage(avatar)
+    if not avatar.avatarUrl or avatar.avatarUrl == "" or not web or not web.get then
+        return
+    end
+    
+    ac.log("Steam Avatar Nameplate: Downloading for " .. avatar.playerName .. " from: " .. avatar.avatarUrl)
+    
+    web.get(avatar.avatarUrl, function(err, response)
+        if err then
+            ac.log("Steam Avatar Nameplate: Error downloading avatar for " .. avatar.playerName .. ": " .. tostring(err))
+            return
+        end
+        
+        if response and response.status == 200 then
+            local imageData = response.body
+            if imageData and #imageData > 0 and ui.decodeImage then
+                avatar.image = ui.decodeImage(imageData)
+                avatar.imageLoaded = avatar.image ~= nil
+                
+                if avatar.imageLoaded then
+                    ac.log("Steam Avatar Nameplate: ✅ Successfully loaded avatar for " .. avatar.playerName)
+                else
+                    ac.log("Steam Avatar Nameplate: Failed to decode image for " .. avatar.playerName)
+                end
+            end
+        end
+    end)
+end
+
+-- Add or update avatar
+function addOrUpdateAvatar(steamId, playerName, avatarUrl, displayTime)
+    ac.log("Steam Avatar Nameplate: ✅ Adding/updating avatar for " .. playerName .. " (Steam ID: " .. steamId .. ")")
+    
+    -- Update player name mapping
+    avatarState.playerNameMap[playerName] = steamId
+    
+    -- Check if avatar already exists
+    if avatarState.avatars[steamId] then
+        local existingAvatar = avatarState.avatars[steamId]
+        existingAvatar.createdAt = os.clock()
+        existingAvatar.lastUpdate = os.clock()
+        existingAvatar.playerName = playerName
+        
+        -- Update URL if changed
+        if existingAvatar.avatarUrl ~= avatarUrl then
+            existingAvatar.avatarUrl = avatarUrl
+            existingAvatar.imageLoaded = false
+            existingAvatar.image = nil
+            downloadAvatarImage(existingAvatar)
+        end
+        
+        ac.log("Steam Avatar Nameplate: Updated existing avatar for " .. playerName)
+    else
+        -- Check persistent cache
+        local cachedAvatar = avatarState.persistentAvatars[steamId]
+        if cachedAvatar and cachedAvatar.avatarUrl == avatarUrl then
+            -- Reuse cached avatar
+            avatarState.avatars[steamId] = {
+                steamId = steamId,
+                playerName = playerName,
+                avatarUrl = avatarUrl,
+                displayTime = displayTime,
+                image = cachedAvatar.image,
+                imageLoaded = cachedAvatar.imageLoaded,
+                createdAt = os.clock(),
+                lastUpdate = os.clock(),
+                alpha = 1.0,
+                fadeState = "visible",
+                visible = true,
+            }
+            ac.log("Steam Avatar Nameplate: Restored avatar from cache for " .. playerName)
+        else
+            -- Create new avatar
+            local newAvatar = createAvatar(steamId, playerName, avatarUrl, displayTime)
+            newAvatar.lastUpdate = os.clock()
+            avatarState.avatars[steamId] = newAvatar
+            downloadAvatarImage(newAvatar)
+            ac.log("Steam Avatar Nameplate: Created new avatar for " .. playerName)
+        end
+    end
+    
+    -- Store in persistent cache
+    avatarState.persistentAvatars[steamId] = {
+        steamId = steamId,
+        playerName = playerName,
+        avatarUrl = avatarUrl,
+        cachedAt = os.clock(),
+        image = avatarState.avatars[steamId].image,
+        imageLoaded = avatarState.avatars[steamId].imageLoaded,
+    }
+end
+
+-- Remove avatar
+function removeAvatar(steamId, playerName)
+    ac.log("Steam Avatar Nameplate: 🗑️ Removing avatar for " .. playerName .. " (Steam ID: " .. steamId .. ")")
+    
+    if avatarState.avatars[steamId] then
+        -- Move to persistent cache before removing
+        local avatar = avatarState.avatars[steamId]
+        avatarState.persistentAvatars[steamId] = {
+            steamId = steamId,
+            playerName = playerName,
+            avatarUrl = avatar.avatarUrl,
+            cachedAt = os.clock(),
+            image = avatar.image,
+            imageLoaded = avatar.imageLoaded,
+        }
+        
+        avatarState.avatars[steamId] = nil
+        ac.log("Steam Avatar Nameplate: ✅ Removed avatar for " .. playerName .. " (cached for later use)")
+    end
+end
+
+-- Get avatar by player name
+function getAvatarByPlayerName(playerName)
+    if not playerName or playerName == "" then
+        return nil
+    end
+    
+    -- Check player name mapping first
+    local steamId = avatarState.playerNameMap[playerName]
+    if steamId and avatarState.avatars[steamId] then
+        return avatarState.avatars[steamId]
+    end
+    
+    -- Direct lookup in active avatars
+    for steamId, avatar in pairs(avatarState.avatars) do
+        if avatar.playerName == playerName then
+            avatarState.playerNameMap[playerName] = steamId
+            return avatar
+        end
+    end
+    
+    -- Check persistent cache
+    for steamId, cachedAvatar in pairs(avatarState.persistentAvatars) do
+        if cachedAvatar.playerName == playerName then
+            -- Check if cache is valid (5 minutes)
+            if os.clock() - cachedAvatar.cachedAt < 300 then
+                -- Restore to active avatars
+                local restoredAvatar = createAvatar(cachedAvatar.steamId, cachedAvatar.playerName, cachedAvatar.avatarUrl, -1)
+                restoredAvatar.image = cachedAvatar.image
+                restoredAvatar.imageLoaded = cachedAvatar.imageLoaded
+                restoredAvatar.lastUpdate = os.clock()
+                avatarState.avatars[steamId] = restoredAvatar
+                
+                avatarState.playerNameMap[playerName] = steamId
+                
+                ac.log("Steam Avatar Nameplate: ✅ RESTORED from cache: " .. playerName)
+                return restoredAvatar
+            end
+        end
+    end
+    
+    return nil
+end
+
+-- ====================
+-- INPUT MODE SYSTEM
+-- ====================
+
+-- Online event to receive input mode broadcasts from server
+local inputModeBroadcastEvent = ac.OnlineEvent({
+    ac.StructItem.key("input_modes_broadcast"),
+    data = ac.StructItem.string(512)
+}, function(sender, message)
+    if message and message.data and message.data ~= "" then
+        ac.log("Steam Avatar Nameplate: Received server input data: " .. message.data)
+        lastBroadcastReceived = os.clock()
+        
+        -- Clear and parse new data
+        serverInputModes = {}
+        
+        -- Parse format: "sessionId:inputMode;sessionId:inputMode;..."
+        for sessionData in string.gmatch(message.data, "([^;]+)") do
+            local sessionId, inputMode = string.match(sessionData, "(%d+):(%w+)")
+            if sessionId and inputMode then
+                local sessionIdNum = tonumber(sessionId)
+                serverInputModes[sessionIdNum] = inputMode
+            end
+        end
+    end
+end)
+
+-- Get input type from server data or fallback to local detection
+function getInputType(car)
+    if not car then return "unknown" end
+    
+    -- Try server data first
+    local sessionId = car.sessionID
+    if sessionId and serverInputModes[sessionId] then
+        return serverInputModes[sessionId]
+    end
+    
+    -- Fallback to local detection
+    local index = car.index or car.carIndex or 0
+    local steer = car.steer or 0
+    local gas = car.gas or 0
+    local brake = car.brake or 0
+    local currentType = "gamepad"
+    local steerAbs = math.abs(steer)
+    
+    if (steer == 0 or steerAbs > 0.95) and (gas == 0 or gas > 0.95) and (brake == 0 or brake > 0.95) then
+        currentType = "keyboard"
+    end
+    if steerAbs > 0.05 and steerAbs < 0.9 then
+        currentType = "wheel"
+    end
+
+    -- Store history for smoothing
+    driverData[index] = driverData[index] or {}
+    driverData[index].inputTypeHistory = driverData[index].inputTypeHistory or {}
+    table.insert(driverData[index].inputTypeHistory, currentType)
+    if #driverData[index].inputTypeHistory > 5 then
+        table.remove(driverData[index].inputTypeHistory, 1)
+    end
+
+    -- Count most frequent
+    local count = { keyboard = 0, wheel = 0, gamepad = 0 }
+    for _, t in ipairs(driverData[index].inputTypeHistory) do
+        count[t] = (count[t] or 0) + 1
+    end
+    local detected = "gamepad"
+    local maxCount = 0
+    for k, v in pairs(count) do
+        if v > maxCount then
+            maxCount = v
+            detected = k
+        end
+    end
+    driverData[index].lastInputType = detected
+    return detected
+end
+
+-- ====================
+-- DRAWING FUNCTIONS
+-- ====================
+
+-- Draw avatar at specific position
+function drawAvatarAtPosition(avatar, x, y, size, alpha)
+    if not avatar or alpha <= 0 then return end
+    
+    size = size or avatarState.avatarSize
+    alpha = alpha or 1.0
+    
+    -- Draw avatar image if loaded, otherwise draw placeholder
+    if avatar.imageLoaded and avatar.image then
+        ui.drawImage(
+            avatar.image,
+            vec2(x, y),
+            vec2(x + size, y + size),
+            rgbm(1, 1, 1, alpha),
+            vec2(0, 0),
+            vec2(1, 1)
+        )
+    else
+        -- Draw placeholder
+        ui.drawRectFilled(
+            vec2(x, y),
+            vec2(x + size, y + size),
+            rgbm(0.3, 0.3, 0.3, alpha),
+            6
+        )
+        
+        -- Draw player initial
+        if avatar.playerName and #avatar.playerName > 0 then
+            local initial = string.upper(string.sub(avatar.playerName, 1, 1))
+            local fontSize = size * 0.4
+            local textColor = rgbm(1, 1, 1, alpha)
+            
+            local textSize = ui.measureText(initial, fontSize)
+            local textX = x + (size - textSize.x) / 2
+            local textY = y + (size - textSize.y) / 2
+            
+            ui.text(initial, vec2(textX, textY), fontSize, textColor)
+        end
+    end
+    
+    -- Draw border
+    ui.drawRect(
+        vec2(x, y),
+        vec2(x + size, y + size),
+        rgbm(1, 1, 1, alpha * 0.8),
+        2, 6
+    )
+end
+
+-- Draw input icon
+function drawInputIcon(inputType, x, y, alpha)
+    local iconSize = 24
+    
+    if inputType == "wheel" then
+        -- Use steering wheel image
+        local success = pcall(function()
+            ui.drawImage(
+                "https://i.ibb.co/VcThxHPz/00b35dfd63f0cf6919af9a11cfe560c4.png",
+                vec2(x, y),
+                vec2(x + iconSize, y + iconSize),
+                rgbm(1.0, 1.0, 1.0, alpha)
+            )
+        end)
+        if not success then
+            ui.dwriteDrawText("🏎", 20, vec2(x, y), rgbm(0.2, 1.0, 0.2, alpha), 1, ui.Alignment.Left, ui.Alignment.Top)
+        end
+    elseif inputType == "keyboard" then
+        ui.dwriteDrawText("⌨", 20, vec2(x, y), rgbm(0.2, 0.8, 1.0, alpha), 1, ui.Alignment.Left, ui.Alignment.Top)
+    elseif inputType == "gamepad" then
+        -- Use controller image
+        local success = pcall(function()
+            ui.drawImage(
+                "https://i.ibb.co/3m56fyZy/gamepad.png",
+                vec2(x, y),
+                vec2(x + iconSize, y + iconSize),
+                rgbm(1.0, 1.0, 1.0, alpha)
+            )
+        end)
+        if not success then
+            ui.dwriteDrawText("🎮", 20, vec2(x, y), rgbm(1.0, 0.8, 0.2, alpha), 1, ui.Alignment.Left, ui.Alignment.Top)
+        end
+    else
+        ui.dwriteDrawText("?", 20, vec2(x, y), rgbm(0.7, 0.7, 0.7, alpha), 1, ui.Alignment.Left, ui.Alignment.Top)
+    end
+end
+
+-- ====================
+-- NAMEPLATE OVERRIDE
+-- ====================
+
+-- Override the default nameplate with custom Steam avatar display
+ui.onDriverNameTag(function(car)
+    -- Clean the driver name
+    local rawName = tostring(car.driverName or "unknown")
+    local name = rawName:gsub("0x[%x]+", ""):gsub("[^%w%s*%-%.%@]", "")
+    name = name:gsub("^%s*(.-)%s*$", "%1")
+    
+    -- CRITICAL: Draw transparent background to override default nameplate rectangle
+    ui.drawRectFilled(vec2(-90, 0), vec2(470, 36), rgbm(0, 0, 0, 0.0), 8)
+    
+    -- Skip if not ready or if it's AI
+    if not isAvatarScriptReady() or not car or not car.isConnected or car.isAIControlled then
+        return
+    end
+    
+    -- Get avatar for this player
+    local avatar = getAvatarByPlayerName(name)
+    
+    local avatarSize = avatarState.avatarSize
+    
+    -- Center the avatar above where the nameplate would be
+    local avatarX = -avatarSize / 2
+    local avatarY = -avatarSize - 10  -- Position above the default nameplate area
+    
+    -- Draw avatar if we have one
+    if avatar then
+        drawAvatarAtPosition(avatar, avatarX, avatarY, avatarSize, 1.0)
+        
+        -- Draw input icon underneath avatar
+        local inputType = getInputType(car)
+        local iconX = -12  -- Center the icon (24px / 2)
+        local iconY = avatarY + avatarSize + 5  -- 5px spacing below avatar
+        
+        drawInputIcon(inputType, iconX, iconY, 1.0)
+    else
+        -- Draw placeholder avatar
+        ui.drawRectFilled(
+            vec2(avatarX, avatarY),
+            vec2(avatarX + avatarSize, avatarY + avatarSize),
+            rgbm(0.3, 0.3, 0.3, 0.7),
+            6
+        )
+        
+        -- Draw player initial
+        if name and #name > 0 then
+            local initial = string.upper(string.sub(name, 1, 1))
+            local fontSize = avatarSize * 0.4
+            local textColor = rgbm(1, 1, 1, 0.8)
+            
+            local textSize = ui.measureText(initial, fontSize)
+            local textX = avatarX + (avatarSize - textSize.x) / 2
+            local textY = avatarY + (avatarSize - textSize.y) / 2
+            
+            ui.text(initial, vec2(textX, textY), fontSize, textColor)
+        end
+        
+        -- Still draw input icon for placeholder
+        local inputType = getInputType(car)
+        local iconX = -12
+        local iconY = avatarY + avatarSize + 5
+        
+        drawInputIcon(inputType, iconX, iconY, 0.8)
+    end
+end)
+
+-- ====================
+-- MESSAGE HANDLER
+-- ====================
+
+-- Chat message handler for Steam Avatar messages
+function onChatMessage(message, sender)
+    -- Check if avatar script is ready
+    if not isAvatarScriptReady() then
+        -- Still hide CSP messages even if not ready
+        if message and message:find("%$CSP") then
+            return false
+        end
+        return true
+    end
+    
+    -- Handle Steam Avatar messages (HIDDEN from chat)
+    if message and message:find("%$STEAM_AVATAR") then
+        -- Try removal first
+        local removalData = parseSteamAvatarRemoval(message)
+        if removalData then
+            removeAvatar(removalData.steamId, removalData.playerName)
+            return false  -- HIDE from chat
+        end
+        
+        -- Try avatar data
+        local avatarData = parseSteamAvatarData(message)
+        if avatarData then
+            addOrUpdateAvatar(
+                avatarData.steamId,
+                avatarData.playerName,
+                avatarData.avatarUrl,
+                avatarData.displayTime
+            )
+            return false  -- HIDE from chat
+        end
+    end
+    
+    -- Hide CSP messages
+    if message and message:find("%$CSP") then
+        return false
+    end
+    
+    return true  -- Allow other messages
+end
+
+-- Clean up expired cache
+function cleanupPersistentCache()
+    local currentTime = os.clock()
+    local expiredKeys = {}
+    
+    for steamId, cachedAvatar in pairs(avatarState.persistentAvatars) do
+        if currentTime - cachedAvatar.cachedAt > 300 then  -- 5 minutes
+            table.insert(expiredKeys, steamId)
+        end
+    end
+    
+    for _, steamId in ipairs(expiredKeys) do
+        local cachedAvatar = avatarState.persistentAvatars[steamId]
+        if cachedAvatar then
+            avatarState.playerNameMap[cachedAvatar.playerName] = nil
+        end
+        avatarState.persistentAvatars[steamId] = nil
+    end
+    
+    if #expiredKeys > 0 then
+        ac.log("Steam Avatar Nameplate: Cleaned up " .. #expiredKeys .. " expired cached avatars")
+    end
+end
+
+-- Update function
+function script.update(dt)
+    -- Clean up cache every 30 seconds
+    if math.floor(os.clock()) % 30 == 0 and math.floor(os.clock() - dt) % 30 ~= 0 then
+        cleanupPersistentCache()
+    end
+end
+
+-- Debug functions
+function debugAvatars()
+    ac.log("Steam Avatar Nameplate: === AVATAR DEBUG INFO ===")
+    ac.log("Steam Avatar Nameplate: Avatar script ready: " .. tostring(avatarInitState.isReady))
+    
+    local activeCount = 0
+    for steamId, avatar in pairs(avatarState.avatars) do
+        activeCount = activeCount + 1
+        ac.log("Steam Avatar Nameplate: Active Avatar " .. activeCount .. ": " .. avatar.playerName .. " (Steam ID: " .. steamId .. ")")
+        ac.log("Steam Avatar Nameplate:   URL: " .. avatar.avatarUrl)
+        ac.log("Steam Avatar Nameplate:   Image loaded: " .. tostring(avatar.imageLoaded))
+    end
+    
+    local cachedCount = 0
+    for steamId, cachedAvatar in pairs(avatarState.persistentAvatars) do
+        cachedCount = cachedCount + 1
+        ac.log("Steam Avatar Nameplate: Cached Avatar " .. cachedCount .. ": " .. cachedAvatar.playerName)
+    end
+    
+    ac.log("Steam Avatar Nameplate: Total active avatars: " .. activeCount)
+    ac.log("Steam Avatar Nameplate: Total cached avatars: " .. cachedCount)
+end
+
+function clearAllAvatars()
+    avatarState.avatars = {}
+    avatarState.persistentAvatars = {}
+    avatarState.playerNameMap = {}
+    ac.log("Steam Avatar Nameplate: Cleared all avatars and cache")
+end
+
+-- Initialize
+ac.onChatMessage(onChatMessage)
+
+ac.log("Steam Avatar Nameplate: ✅ Initialized")
+ac.log("Steam Avatar Nameplate: 🎯 Features:")
+ac.log("  ✅ Steam avatars displayed above players")
+ac.log("  ✅ Input icons shown under avatars")
+ac.log("  ✅ Default nameplate content hidden")
+ac.log("  ✅ No names, flags, or ping displayed")
+ac.log("")
+ac.log("Steam Avatar Nameplate: Available console commands:")
+ac.log("  🔍 debugAvatars()")
+ac.log("  🧹 clearAllAvatars()")
+ac.log("")
+ac.log("Steam Avatar Nameplate: 🚀 READY!")
