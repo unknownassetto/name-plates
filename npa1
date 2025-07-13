@@ -1,0 +1,452 @@
+-- Steam Avatar Car Tags for Assetto Corsa Server
+-- Displays only Steam avatars over cars
+
+-- ====================
+-- STEAM AVATAR SYSTEM
+-- ====================
+
+-- Avatar state management
+local avatarState = {
+    avatars = {},  -- Table to store active avatars by steamId
+    playerNameMap = {},  -- Map player names to Steam IDs
+    avatarSize = 64,  -- Avatar size in pixels
+}
+
+-- Driver data and canvas storage
+local driverData = {}
+local nametagCanvas = {}
+local numberOfCars = 0
+local globaldt = 0.016
+
+-- Initialize data for all cars
+for i = 0, 1000 do
+    if not ac.getCar(i) then
+        break
+    end
+    numberOfCars = numberOfCars + 1
+    driverData[i] = {
+        driverName = "",
+        lastUpdate = 0
+    }
+    nametagCanvas[i] = {
+        canvas = ui.ExtraCanvas(vec2(100, 100), 1, render.AntialiasingMode.ExtraSharpCMAA),
+        fadeCurrent = 0,
+        fadeTarget = 0,
+        lastUpdate = 0
+    }
+end
+
+local tagsDistance = 150
+local updateInterval = 0.1
+
+-- Avatar data structure
+local function createAvatar(steamId, playerName, avatarUrl, displayTime)
+    return {
+        steamId = steamId,
+        playerName = playerName,
+        avatarUrl = avatarUrl,
+        displayTime = displayTime or -1,  -- Persistent
+        image = nil,
+        imageLoaded = false,
+        createdAt = os.clock(),
+        alpha = 1.0,
+        visible = true,
+        lastUpdate = os.clock(),
+    }
+end
+
+-- Parse Steam Avatar data from chat message
+function parseSteamAvatarData(message)
+    if not message or not message:find("%$STEAM_AVATAR%$") then
+        return nil
+    end
+    
+    local avatarDataString = message:gsub("%$STEAM_AVATAR%$", "")
+    local parts = {}
+    for part in avatarDataString:gmatch("[^$]+") do
+        table.insert(parts, part)
+    end
+    
+    if #parts >= 4 then
+        return {
+            steamId = parts[1],
+            playerName = parts[2],
+            avatarUrl = parts[3],
+            displayTime = tonumber(parts[4]) or 5.0
+        }
+    end
+    return nil
+end
+
+-- Parse Steam Avatar removal message
+function parseSteamAvatarRemoval(message)
+    if not message or not message:find("%$STEAM_AVATAR_REMOVE%$") then
+        return nil
+    end
+    
+    local removalDataString = message:gsub("%$STEAM_AVATAR_REMOVE%$", "")
+    local parts = {}
+    for part in removalDataString:gmatch("[^$]+") do
+        table.insert(parts, part)
+    end
+    
+    if #parts >= 2 then
+        return {
+            steamId = parts[1],
+            playerName = parts[2]
+        }
+    end
+    return nil
+end
+
+-- Download avatar image
+function downloadAvatarImage(avatar)
+    if not avatar.avatarUrl or avatar.avatarUrl == "" or not web or not web.get then
+        ac.log("Steam Avatar: Cannot download - missing URL or web API")
+        return
+    end
+    
+    ac.log("Steam Avatar: Downloading for " .. avatar.playerName .. " from: " .. avatar.avatarUrl)
+    
+    web.get(avatar.avatarUrl, function(err, response)
+        if err then
+            ac.log("Steam Avatar: Error downloading avatar for " .. avatar.playerName .. ": " .. tostring(err))
+            return
+        end
+        
+        if response and response.status == 200 then
+            local imageData = response.body
+            if imageData and #imageData > 0 and ui.decodeImage then
+                avatar.image = ui.decodeImage(imageData)
+                avatar.imageLoaded = avatar.image ~= nil
+                
+                if avatar.imageLoaded then
+                    ac.log("Steam Avatar: ✅ Successfully loaded avatar for " .. avatar.playerName)
+                else
+                    ac.log("Steam Avatar: Failed to decode image for " .. avatar.playerName)
+                end
+            end
+        else
+            ac.log("Steam Avatar: Bad response for " .. avatar.playerName .. ": " .. (response and response.status or "no response"))
+        end
+    end)
+end
+
+-- Add or update avatar
+function addOrUpdateAvatar(steamId, playerName, avatarUrl, displayTime)
+    ac.log("Steam Avatar: ✅ Adding/updating avatar for " .. playerName .. " (Steam ID: " .. steamId .. ")")
+    
+    -- Update player name mapping
+    avatarState.playerNameMap[playerName] = steamId
+    
+    -- Check if avatar already exists
+    if avatarState.avatars[steamId] then
+        local existingAvatar = avatarState.avatars[steamId]
+        existingAvatar.createdAt = os.clock()
+        existingAvatar.lastUpdate = os.clock()
+        existingAvatar.playerName = playerName
+        
+        -- Update URL if changed
+        if existingAvatar.avatarUrl ~= avatarUrl then
+            existingAvatar.avatarUrl = avatarUrl
+            existingAvatar.imageLoaded = false
+            existingAvatar.image = nil
+            downloadAvatarImage(existingAvatar)
+        end
+        
+        ac.log("Steam Avatar: Updated existing avatar for " .. playerName)
+    else
+        -- Create new avatar
+        local newAvatar = createAvatar(steamId, playerName, avatarUrl, displayTime)
+        avatarState.avatars[steamId] = newAvatar
+        downloadAvatarImage(newAvatar)
+        ac.log("Steam Avatar: Created new avatar for " .. playerName)
+    end
+end
+
+-- Remove avatar by Steam ID
+function removeAvatar(steamId, playerName)
+    ac.log("Steam Avatar: 🗑️ Removing avatar for " .. playerName .. " (Steam ID: " .. steamId .. ")")
+    
+    if avatarState.avatars[steamId] then
+        avatarState.avatars[steamId] = nil
+        ac.log("Steam Avatar: ✅ Removed avatar for " .. playerName)
+    else
+        ac.log("Steam Avatar: ⚠️ Could not find avatar to remove for " .. playerName)
+    end
+    
+    -- Clean up player name mapping
+    avatarState.playerNameMap[playerName] = nil
+end
+
+-- Get avatar by player name
+function getAvatarByPlayerName(playerName)
+    if not playerName or playerName == "" then
+        return nil
+    end
+    
+    -- Check player name mapping first
+    local steamId = avatarState.playerNameMap[playerName]
+    if steamId and avatarState.avatars[steamId] then
+        return avatarState.avatars[steamId]
+    end
+    
+    -- Direct lookup in active avatars
+    for steamId, avatar in pairs(avatarState.avatars) do
+        if avatar.playerName == playerName then
+            -- Update mapping for future lookups
+            avatarState.playerNameMap[playerName] = steamId
+            return avatar
+        end
+    end
+    
+    return nil
+end
+
+-- Chat message handler for Steam Avatars
+function onChatMessage(message, sender)
+    -- Handle Steam Avatar messages (HIDDEN from chat)
+    if message and message:find("%$STEAM_AVATAR") then
+        -- Try removal first
+        local removalData = parseSteamAvatarRemoval(message)
+        if removalData then
+            removeAvatar(removalData.steamId, removalData.playerName)
+            return false  -- HIDE from chat
+        end
+        
+        -- Try avatar data
+        local avatarData = parseSteamAvatarData(message)
+        if avatarData then
+            addOrUpdateAvatar(
+                avatarData.steamId,
+                avatarData.playerName,
+                avatarData.avatarUrl,
+                avatarData.displayTime
+            )
+            return false  -- HIDE from chat
+        end
+    end
+    
+    -- Hide CSP messages
+    if message and message:find("%$CSP") then
+        return false  -- ALWAYS hide CSP messages
+    end
+    
+    return true  -- Allow other messages
+end
+
+-- Draw avatar at specific position
+function drawAvatarAtPosition(avatar, x, y, size, alpha)
+    if not avatar or alpha <= 0 then return end
+    
+    size = size or avatarState.avatarSize
+    alpha = alpha or 1.0
+    
+    -- Draw avatar image if loaded, otherwise draw placeholder
+    if avatar.imageLoaded and avatar.image then
+        ui.drawImage(
+            avatar.image,
+            vec2(x, y),
+            vec2(x + size, y + size),
+            rgbm(1, 1, 1, alpha),
+            vec2(0, 0),
+            vec2(1, 1)
+        )
+    else
+        -- Draw placeholder circle
+        local centerX = x + size / 2
+        local centerY = y + size / 2
+        local radius = size / 2
+        
+        ui.drawCircleFilled(
+            vec2(centerX, centerY),
+            radius,
+            rgbm(0.3, 0.3, 0.3, alpha)
+        )
+        
+        -- Draw player initial
+        if avatar.playerName and #avatar.playerName > 0 then
+            local initial = string.upper(string.sub(avatar.playerName, 1, 1))
+            local fontSize = size * 0.4
+            local textColor = rgbm(1, 1, 1, alpha)
+            
+            ui.pushFont(ui.Font.Main)
+            local textSize = ui.measureText(initial)
+            local textX = centerX - textSize.x / 2
+            local textY = centerY - textSize.y / 2
+            
+            ui.drawText(initial, vec2(textX, textY), textColor)
+            ui.popFont()
+        end
+    end
+    
+    -- Draw circular border
+    local centerX = x + size / 2
+    local centerY = y + size / 2
+    local radius = size / 2
+    
+    ui.drawCircle(
+        vec2(centerX, centerY),
+        radius,
+        rgbm(1, 1, 1, alpha * 0.8),
+        2
+    )
+end
+
+-- Render only Steam avatar
+function renderSteamAvatar(carIndex)
+    local canvas = nametagCanvas[carIndex].canvas
+    
+    canvas:clear()
+    
+    -- Get driver data for this car
+    local driverName = ac.getDriverName(carIndex)
+    if not driverName or driverName == "" then
+        return
+    end
+    
+    -- Get avatar for this player
+    local avatar = getAvatarByPlayerName(driverName)
+    if not avatar then
+        return -- No avatar to display
+    end
+    
+    -- Canvas dimensions
+    local canvasWidth = 100
+    local canvasHeight = 100
+    local avatarSize = 64
+    
+    -- Center the avatar on the canvas
+    local avatarX = (canvasWidth - avatarSize) / 2
+    local avatarY = (canvasHeight - avatarSize) / 2
+    
+    -- Draw the avatar
+    drawAvatarAtPosition(avatar, avatarX, avatarY, avatarSize, 1.0)
+end
+
+-- Main nametag rendering function
+function renderDriverNameTag(carData)
+    -- Update driver data
+    driverData[carData.index].driverName = ac.getDriverName(carData.index)
+    driverData[carData.index].distanceToCamera = carData.distanceToCamera
+    
+    local currentTime = os.clock()
+    if not driverData[carData.index].lastUpdate then
+        driverData[carData.index].lastUpdate = currentTime
+    end
+    
+    local shouldUpdate = (currentTime - driverData[carData.index].lastUpdate) > updateInterval
+    
+    -- Only update if within distance and has an avatar
+    if shouldUpdate and driverData[carData.index].distanceToCamera < tagsDistance then
+        local driverName = driverData[carData.index].driverName
+        local avatar = getAvatarByPlayerName(driverName)
+        
+        if avatar then -- Only render if we have an avatar
+            nametagCanvas[carData.index].canvas:update(function()
+                renderSteamAvatar(carData.index)
+            end)
+        end
+        
+        driverData[carData.index].lastUpdate = currentTime
+    end
+    
+    -- Handle fading and display
+    if driverData[carData.index].distanceToCamera < tagsDistance then
+        local driverName = driverData[carData.index].driverName
+        local avatar = getAvatarByPlayerName(driverName)
+        
+        if avatar then -- Only show if we have an avatar
+            local distance = driverData[carData.index].distanceToCamera
+            local sizeScale = math.clamp(((tagsDistance - distance) / tagsDistance)^0.5, 0.6, 1.4)
+            
+            nametagCanvas[carData.index].fadeTarget = math.clamp((tagsDistance - distance) / (tagsDistance * 0.2), 0, 1)
+            
+            local fadeSpeed = globaldt * 4
+            if nametagCanvas[carData.index].fadeTarget > nametagCanvas[carData.index].fadeCurrent then
+                nametagCanvas[carData.index].fadeCurrent = math.min(
+                    nametagCanvas[carData.index].fadeCurrent + fadeSpeed, 
+                    nametagCanvas[carData.index].fadeTarget
+                )
+            else
+                nametagCanvas[carData.index].fadeCurrent = math.max(
+                    nametagCanvas[carData.index].fadeCurrent - fadeSpeed, 
+                    nametagCanvas[carData.index].fadeTarget
+                )
+            end
+            
+            if nametagCanvas[carData.index].fadeCurrent > 0.01 then
+                local canvasWidth = 100 * sizeScale
+                local canvasHeight = 100 * sizeScale
+                local canvasX = (600 - canvasWidth) / 2
+                local canvasY = (250 - canvasHeight) / 2
+                
+                ui.drawImage(
+                    nametagCanvas[carData.index].canvas, 
+                    vec2(canvasX, canvasY), 
+                    vec2(canvasWidth, canvasHeight), 
+                    rgbm(1, 1, 1, nametagCanvas[carData.index].fadeCurrent)
+                )
+            end
+        end
+    else
+        nametagCanvas[carData.index].fadeTarget = 0
+        nametagCanvas[carData.index].fadeCurrent = 0
+    end
+end
+
+function script.update(dt)
+    globaldt = dt
+end
+
+-- Debug functions
+function debugAvatars()
+    ac.log("Steam Avatar: === AVATAR DEBUG INFO ===")
+    
+    local activeCount = 0
+    for steamId, avatar in pairs(avatarState.avatars) do
+        activeCount = activeCount + 1
+        ac.log("Steam Avatar: Active Avatar " .. activeCount .. ": " .. avatar.playerName .. " (Steam ID: " .. steamId .. ")")
+        ac.log("Steam Avatar:   URL: " .. avatar.avatarUrl)
+        ac.log("Steam Avatar:   Image loaded: " .. tostring(avatar.imageLoaded))
+    end
+    
+    ac.log("Steam Avatar: Total active avatars: " .. activeCount)
+    ac.log("Steam Avatar: Player name mappings:")
+    for playerName, steamId in pairs(avatarState.playerNameMap) do
+        ac.log("Steam Avatar:   " .. playerName .. " -> " .. steamId)
+    end
+end
+
+function clearAllAvatars()
+    avatarState.avatars = {}
+    avatarState.playerNameMap = {}
+    ac.log("Steam Avatar: Cleared all avatars and mappings")
+end
+
+function testAddAvatar()
+    addOrUpdateAvatar("76561198000000001", "TestPlayer", "https://avatars.steamstatic.com/b5bd56c1aa4644a474a2e4972be27ef9e82e517e_medium.jpg", -1)
+    ac.log("Steam Avatar: Added test avatar")
+end
+
+-- Register chat handler
+ac.onChatMessage(onChatMessage)
+
+-- Initialize the nametag system
+ui.onDriverNameTag(
+    true, 
+    rgbm(1, 1, 1, 0),  -- Hide default nametag completely
+    renderDriverNameTag, 
+    {
+        mainSize = 1.2, 
+        mirrorSize = 4, 
+        distanceMultiplier = 3, 
+        tagSize = vec2(600, 250)
+    }
+)
+
+ac.log("Steam Avatar Car Tags: ✅ Initialized - Only Steam avatars will be displayed over cars")
+ac.log("Steam Avatar Car Tags: Available console commands:")
+ac.log("  🔍 debugAvatars() - Show avatar debug info")
+ac.log("  🧹 clearAllAvatars() - Clear all avatars")
+ac.log("  🧪 testAddAvatar() - Add a test avatar")
