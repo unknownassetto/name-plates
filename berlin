@@ -1,0 +1,1091 @@
+-- Enhanced Safety Rating Client Script with Rectangle UI for AssettoServer
+-- Place this in: assettocorsa/extension/lua/online/safety_rating_client.lua
+-- Features: Clean Rectangle UI design with perfect alignment, custom gradients, images, and transparent backgrounds
+
+local safetyRatingData = {}
+local serverInputModes = {} -- Store server input mode data
+local uiVisible = true
+local lastUpdateTime = 0
+local debugMode = false
+local fadeAnimation = 1.0
+local lastMessageTime = 0
+local messageCount = 0
+local lastDataUpdate = 0
+local lastBroadcastReceived = 0
+local connectionStatus = "Waiting for data..."
+local mySessionId = nil
+
+-- Font loading variables
+local fontsURL = 'https://www.dl.dropboxusercontent.com/scl/fi/1kp96w5xl0tc603mdf9bi/Fonts.rar?rlkey=4xvj48kxxyzsldkxlgefelkxu'
+local berlinFontRegular, berlinFontBold, berlinFontUltraBold
+local fontsLoaded = false
+
+-- UI Images
+local flagIcon = nil
+local imagesLoaded = false
+
+-- UI position and scaling variables
+local uiPosition = vec2(0, 0)  -- Position offset for the entire UI
+local uiScale = 1.0            -- UI scaling factor
+
+-- UI interaction variables
+local isDragging = false
+local isScalingMode = false
+local dragStartPos = vec2(0, 0)
+local dragStartUiPos = vec2(0, 0)
+local rightClickTimer = 0
+local rightClickHeld = false
+local scaleChangeRate = 0.05
+local minScale = 0.5
+local maxScale = 3.0
+
+-- UI hint display variables
+local showUIHint = false
+local uiHintTimer = 0
+local uiHintDuration = 3.0  -- Show hint for 3 seconds after clicking
+
+-- Animation variables for gorgeous effects
+local pulseAnimation = 0
+local glowIntensity = 0
+local animationTime = 0
+
+-- Get sim reference once
+local sim = ac.getSim()
+
+-- Enhanced UI Configuration for rectangles - PERFECT ALIGNMENT
+local uiConfig = {
+    width = 340,                -- Master width - all rectangles use this EXACTLY
+    headerHeight = 60,          -- Driver rating header - tallest
+    localPlayerHeight = 50,     -- Local player - medium height
+    topPlayersHeaderHeight = 40,-- Top players header - shorter
+    playerEntryHeight = 40,     -- Individual player entries - same as top players header
+    spacing = 8,                -- Nice spacing between elements
+    cornerRadius = 0,           -- Sharp edges - no rounded corners
+    fontSize = 13,
+    headerFontSize = 14,
+    titleFontSize = 16,
+    padding = 15
+}
+
+-- Safety rating colors (normalized 0-1) with enhanced vibrancy
+local rankColors = {
+    S = rgbm(0.2, 1.0, 0.3, 1),      -- Bright Green
+    A = rgbm(0.6, 1.0, 0.2, 1),      -- Lime Green  
+    B = rgbm(1.0, 0.9, 0.1, 1),      -- Bright Yellow
+    C = rgbm(1.0, 0.6, 0.1, 1),      -- Vibrant Orange
+    D = rgbm(1.0, 0.2, 0.2, 1)       -- Bright Red
+}
+
+-- Enhanced color palette for gorgeous UI
+local colors = {
+    background = rgbm(0.05, 0.05, 0.15, 0.85),
+    backgroundSecondary = rgbm(0.1, 0.1, 0.2, 0.75),
+    headerBackground = rgbm(0.05, 0.05, 0.15, 0.5),  -- 50% transparency for header
+    topPlayersBackground = rgbm(0.05, 0.05, 0.15, 0.5),  -- Match header transparency
+    accent = rgbm(0.3, 0.7, 1.0, 1),
+    accentSecondary = rgbm(0.8, 0.4, 1.0, 1),
+    text = rgbm(1, 1, 1, 1),
+    textSecondary = rgbm(0.9, 0.9, 0.95, 0.9),
+    textMuted = rgbm(0.7, 0.7, 0.8, 0.8),
+    border = rgbm(0.4, 0.6, 0.9, 0.6),
+    borderGlow = rgbm(0.6, 0.8, 1.0, 0.8),
+    shadow = rgbm(0, 0, 0, 0.9),
+    transparentBlack = rgbm(0, 0, 0, 0.5),
+    separatorBlack = rgbm(0, 0, 0, 0.7)
+}
+
+-- Load font resources from remote URL (same pattern as nametags script)
+web.loadRemoteAssets(fontsURL, function(err, folder)
+    if err then
+        ac.debug("SafetyRating", "ERROR loading fonts: " .. tostring(err))
+        return
+    end
+    
+    if not folder then
+        ac.debug("SafetyRating", "ERROR: Font folder is nil")
+        return
+    end
+    
+    -- Try to find font files in the extracted folder
+    local berlinRegularPath = folder .. "/Fonts/Berlin Sans FB Regular.ttf"
+    local berlinBoldPath = folder .. "/Fonts/Berlin Sans FB Bold.ttf" 
+    local berlinDemiBoldPath = folder .. "/Fonts/Berlin Sans FB Demi Bold.ttf"
+    
+    -- Create font strings with weight specifications (like nametags script)
+    berlinFontRegular = string.format("Berlin Sans FB:%s;Weight=Regular", berlinRegularPath)
+    berlinFontBold = string.format("Berlin Sans FB:%s;Weight=Bold", berlinBoldPath)
+    berlinFontUltraBold = string.format("Berlin Sans FB:%s;Weight=UltraBold", berlinDemiBoldPath)
+    
+    fontsLoaded = true
+    ac.debug("SafetyRating", "✓ Berlin Sans FB fonts loaded successfully!")
+end)
+
+-- Simplified font functions using Berlin Sans FB Demi Bold
+function drawTextWithBerlinFont(text, fontSize, x, y, textColor, outlineColor)
+    -- Use Berlin Sans FB Demi Bold for all text (same pattern as nametags script)
+    if fontsLoaded and berlinDemiBold then
+        ui.pushDWriteFont(berlinDemiBold)
+    else
+        -- Fallback to system font
+        ui.pushDWriteFont('Berlin Sans FB')
+    end
+    
+    -- Draw outline if requested
+    if outlineColor then
+        local outlineOffset = 1.2
+        for offsetX = -outlineOffset, outlineOffset, 0.4 do
+            for offsetY = -outlineOffset, outlineOffset, 0.4 do
+                if math.abs(offsetX) + math.abs(offsetY) > 0.1 then
+                    ui.dwriteDrawText(text, fontSize, vec2(x + offsetX, y + offsetY), outlineColor)
+                end
+            end
+        end
+    end
+    
+    -- Draw main text
+    ui.dwriteDrawText(text, fontSize, vec2(x, y), textColor)
+    ui.popDWriteFont()
+end
+
+function measureTextWithBerlinFont(text, fontSize)
+    -- Use Berlin Sans FB Demi Bold for measuring
+    if fontsLoaded and berlinDemiBold then
+        ui.pushDWriteFont(berlinDemiBold)
+    else
+        ui.pushDWriteFont('Berlin Sans FB')
+    end
+    
+    local size = ui.measureDWriteText(text, fontSize)
+    ui.popDWriteFont()
+    return size
+end
+
+function drawHeaderTextWithBerlinFont(text, fontSize, x, y, textColor, outlineColor)
+    -- Use Berlin Sans FB Demi Bold for headers too
+    if fontsLoaded and berlinDemiBold then
+        ui.pushDWriteFont(berlinDemiBold)
+    else
+        ui.pushDWriteFont('Berlin Sans FB')
+    end
+    
+    if outlineColor then
+        local outlineOffset = 2.0
+        for offsetX = -outlineOffset, outlineOffset, 0.5 do
+            for offsetY = -outlineOffset, outlineOffset, 0.5 do
+                if math.abs(offsetX) + math.abs(offsetY) > 0.1 then
+                    ui.dwriteDrawText(text, fontSize, vec2(x + offsetX, y + offsetY), outlineColor)
+                end
+            end
+        end
+    end
+    
+    ui.dwriteDrawText(text, fontSize, vec2(x, y), textColor)
+    ui.popDWriteFont()
+end
+
+function measureHeaderTextWithBerlinFont(text, fontSize)
+    if fontsLoaded and berlinDemiBold then
+        ui.pushDWriteFont(berlinDemiBold)
+    else
+        ui.pushDWriteFont('Berlin Sans FB')
+    end
+    
+    local size = ui.measureDWriteText(text, fontSize)
+    ui.popDWriteFont()
+    return size
+end
+
+-- Perfect rectangle drawing function with rounded corners
+function drawAlignedRectangle(x, y, width, height, fillColor, outlineColor, outlineWidth, shadowOffset, cornerRadius)
+    outlineWidth = outlineWidth or 0
+    shadowOffset = shadowOffset or 0
+    cornerRadius = cornerRadius or 0
+    
+    -- Draw shadow if requested
+    if shadowOffset > 0 then
+        ui.drawRectFilled(
+            vec2(x + shadowOffset, y + shadowOffset), 
+            vec2(x + width + shadowOffset, y + height + shadowOffset), 
+            rgbm(0, 0, 0, 0.3), 
+            cornerRadius
+        )
+    end
+    
+    -- Draw fill if requested
+    if fillColor then
+        ui.drawRectFilled(
+            vec2(x, y), 
+            vec2(x + width, y + height), 
+            fillColor, 
+            cornerRadius
+        )
+    end
+    
+    -- Draw outline if requested
+    if outlineColor and outlineWidth > 0 then
+        ui.drawRect(
+            vec2(x, y), 
+            vec2(x + width, y + height), 
+            outlineColor, 
+            cornerRadius, 
+            outlineWidth
+        )
+    end
+    
+    return {
+        vec2(x, y),                    -- Top-left
+        vec2(x + width, y),            -- Top-right
+        vec2(x + width, y + height),   -- Bottom-right
+        vec2(x, y + height)            -- Bottom-left
+    }
+end
+
+-- Function to draw background image in rectangle
+function drawRectangleWithImage(x, y, width, height, imageURL, tintColor, cornerRadius)
+    local success = pcall(function()
+        -- For rectangles, we use the standard drawImage function
+        ui.drawImage(
+            imageURL,
+            vec2(x, y),
+            vec2(x + width, y + height),
+            tintColor or rgbm(1, 1, 1, 0.8)
+        )
+    end)
+    
+    if not success then
+        -- Fallback to solid color
+        ui.drawRectFilled(
+            vec2(x, y), 
+            vec2(x + width, y + height), 
+            colors.transparentBlack, 
+            cornerRadius or 0
+        )
+    end
+end
+
+-- Function to draw centered text in rectangle
+function drawCenteredTextInRectangle(x, y, width, height, text, fontSize, color, yOffset)
+    local centerX = x + width / 2
+    local centerY = y + height / 2
+    
+    if yOffset then
+        centerY = centerY + yOffset * uiScale
+    end
+    
+    local textSize = measureTextWithBerlinFont(text, fontSize)
+    drawTextWithBerlinFont(text, fontSize, centerX - textSize.x/2, centerY - textSize.y/2, color, colors.shadow)
+end
+
+-- Input Icon Drawing Function with enhanced visuals
+function drawInputIcon(inputType, x, y, size, alpha)
+    local iconSize = size or 20
+    local glowAlpha = math.sin(animationTime * 3) * 0.3 + 0.7 -- Subtle pulse
+    
+    if inputType == "wheel" then
+        -- Enhanced steering wheel with glow
+        local success = pcall(function()
+            -- Draw glow effect
+            ui.drawImage(
+                "https://i.ibb.co/VcThxHPz/00b35dfd63f0cf6919af9a11cfe560c4.png",
+                vec2(x - 1, y - 1),
+                vec2(x + iconSize + 2, y + iconSize + 2),
+                rgbm(0.2, 1.0, 0.2, glowAlpha * alpha * 0.5)
+            )
+            -- Draw main icon
+            ui.drawImage(
+                "https://i.ibb.co/VcThxHPz/00b35dfd63f0cf6919af9a11cfe560c4.png",
+                vec2(x, y),
+                vec2(x + iconSize, y + iconSize),
+                rgbm(1.0, 1.0, 1.0, alpha)
+            )
+        end)
+        if not success then
+            drawTextWithBerlinFont("🏎", iconSize, x, y, rgbm(0.2, 1.0, 0.2, alpha), colors.shadow)
+        end
+    elseif inputType == "keyboard" then
+        drawTextWithBerlinFont("⌨", iconSize, x, y, rgbm(0.2, 0.8, 1.0, alpha), colors.shadow)
+    elseif inputType == "gamepad" then
+        local success = pcall(function()
+            -- Draw glow effect
+            ui.drawImage(
+                "https://i.ibb.co/3m56fyZy/gamepad.png",
+                vec2(x - 1, y - 1),
+                vec2(x + iconSize + 2, y + iconSize + 2),
+                rgbm(1.0, 0.8, 0.2, glowAlpha * alpha * 0.5)
+            )
+            -- Draw main icon
+            ui.drawImage(
+                "https://i.ibb.co/3m56fyZy/gamepad.png",
+                vec2(x, y),
+                vec2(x + iconSize, y + iconSize),
+                rgbm(1.0, 1.0, 1.0, alpha)
+            )
+        end)
+        if not success then
+            drawTextWithBerlinFont("🎮", iconSize, x, y, rgbm(1.0, 0.8, 0.2, alpha), colors.shadow)
+        end
+    else
+        drawTextWithBerlinFont("?", iconSize, x, y, rgbm(0.7, 0.7, 0.7, alpha), colors.shadow)
+    end
+end
+
+-- Function to get input type from server data
+function getInputType(sessionId)
+    if sessionId and serverInputModes[sessionId] then
+        return serverInputModes[sessionId]
+    end
+    return "unknown"
+end
+
+-- UI Settings functions
+function saveUISettings()
+    ac.store("safety_rating_ui_position_x", uiPosition.x)
+    ac.store("safety_rating_ui_position_y", uiPosition.y)
+    ac.store("safety_rating_ui_scale", uiScale)
+    ac.log("Safety Rating UI settings saved - Position: " .. uiPosition.x .. ", " .. uiPosition.y .. " Scale: " .. uiScale)
+end
+
+function loadUISettings()
+    local savedPosX = ac.load("safety_rating_ui_position_x")
+    local savedPosY = ac.load("safety_rating_ui_position_y")
+    local savedScale = ac.load("safety_rating_ui_scale")
+    
+    if savedPosX ~= nil then uiPosition.x = savedPosX end
+    if savedPosY ~= nil then uiPosition.y = savedPosY end
+    if savedScale ~= nil and savedScale >= minScale and savedScale <= maxScale then
+        uiScale = savedScale
+    end
+    
+    ac.log("Safety Rating UI settings loaded - Position: " .. uiPosition.x .. ", " .. uiPosition.y .. " Scale: " .. uiScale)
+end
+
+-- Enhanced image loading function
+function loadImages()
+    if imagesLoaded then return end
+    
+    pcall(function()
+        -- Create a gorgeous racing flag icon
+        flagIcon = ui.ExtraCanvas(32, 20)
+        flagIcon:update(function()
+            -- Enhanced checkered flag with gradients
+            ui.drawRectFilled(vec2(0, 0), vec2(32, 20), rgbm(0.1, 0.1, 0.1, 1))
+            
+            -- Checkered pattern with subtle gradients
+            for x = 0, 24, 8 do
+                for y = 0, 12, 4 do
+                    local isWhite = ((x / 8) + (y / 4)) % 2 == 0
+                    if isWhite then
+                        ui.drawRectFilled(vec2(x, y), vec2(x + 8, y + 4), rgbm(0.95, 0.95, 1.0, 1))
+                    end
+                end
+            end
+            
+            -- Add subtle border
+            ui.drawRect(vec2(0, 0), vec2(32, 20), rgbm(0.6, 0.6, 0.8, 0.8), 0, 1)
+        end)
+        
+        ac.debug("SafetyRating", "Enhanced flag icon created successfully")
+    end)
+    
+    imagesLoaded = true
+    ac.debug("SafetyRating", "Enhanced images loaded successfully")
+end
+
+-- OnlineEvent handlers
+local safetyRatingEvent = ac.OnlineEvent({
+    ac.StructItem.key("safety_rating_update"),
+    data = ac.StructItem.string(1024),
+}, function(sender, message)
+    local success, result = pcall(function()
+        messageCount = messageCount + 1
+        lastMessageTime = os.clock()
+        
+        if debugMode then
+            ac.debug("SafetyRating", string.format("OnlineEvent #%d from sender %s: '%s'", 
+                messageCount, tostring(sender), tostring(message.data)))
+        end
+        
+        if message.data and string.len(message.data) > 0 then
+            local parseSuccess = parseSafetyRatingUpdate(message.data)
+            if parseSuccess then
+                lastDataUpdate = os.clock()
+                ac.debug("SafetyRating", "✓ Successfully parsed OnlineEvent safety rating data!")
+                return true
+            else
+                if debugMode then
+                    ac.debug("SafetyRating", "✗ Failed to parse OnlineEvent data: '" .. tostring(message.data) .. "'")
+                end
+            end
+        end
+        
+        return false
+    end)
+    
+    if not success then
+        ac.debug("SafetyRating", "ERROR in OnlineEvent handler: " .. tostring(result))
+        return false
+    end
+    
+    return result
+end)
+
+local inputModeBroadcastEvent = ac.OnlineEvent({
+    ac.StructItem.key("input_modes_broadcast"),
+    data = ac.StructItem.string(512)
+}, function(sender, message)
+    if message and message.data and message.data ~= "" then
+        ac.log("SafetyRating: Received server input data: " .. message.data)
+        lastBroadcastReceived = os.clock()
+        
+        serverInputModes = {}
+        
+        for sessionData in string.gmatch(message.data, "([^;]+)") do
+            local sessionId, inputMode = string.match(sessionData, "(%d+):(%w+)")
+            if sessionId and inputMode then
+                local sessionIdNum = tonumber(sessionId)
+                serverInputModes[sessionIdNum] = inputMode
+                if debugMode then
+                    ac.log("SafetyRating: Server input data - Session " .. sessionId .. " = " .. inputMode)
+                end
+            end
+        end
+    end
+end)
+
+local individualRatingEvent = ac.OnlineEvent({
+    ac.StructItem.key("individual_safety_rating"),
+    session_id = ac.StructItem.int16(),
+    safety_rating = ac.StructItem.float(),
+    distance_driven = ac.StructItem.float(),
+    total_penalty_points = ac.StructItem.float(),
+    rank_name = ac.StructItem.string(16),
+    rank_color = ac.StructItem.string(8),
+}, function(sender, message)
+    local success, result = pcall(function()
+        if debugMode then
+            ac.debug("SafetyRating", string.format("Individual rating event: Session=%d, Rating=%.2f, Rank=%s", 
+                message.session_id, message.safety_rating, message.rank_name))
+        end
+        
+        safetyRatingData[message.session_id] = {
+            rating = message.safety_rating,
+            distance = message.distance_driven,
+            penalty = message.total_penalty_points,
+            rank = message.rank_name,
+            color = message.rank_color,
+            name = "Player " .. tostring(message.session_id),
+            lastUpdate = os.clock()
+        }
+        
+        lastDataUpdate = os.clock()
+        messageCount = messageCount + 1
+        lastMessageTime = os.clock()
+        
+        return true
+    end)
+    
+    if not success then
+        ac.debug("SafetyRating", "ERROR in individual rating handler: " .. tostring(result))
+    end
+    
+    return result
+end)
+
+-- Function to get current player's session ID
+function getMySessionId()
+    if mySessionId then
+        return mySessionId
+    end
+    
+    local carId = ac.getSim().focusedCar
+    if carId and carId >= 0 then
+        local car = ac.getCar(carId)
+        if car and car.sessionID then
+            mySessionId = car.sessionID
+            return mySessionId
+        end
+    end
+    
+    mySessionId = ac.getSim().carID
+    if debugMode then
+        ac.debug("SafetyRating", "Using fallback session ID: " .. tostring(mySessionId))
+    end
+    
+    return mySessionId
+end
+
+function script.update(dt)
+    local currentTime = os.clock()
+    animationTime = animationTime + dt
+    
+    -- Update pulse animation
+    pulseAnimation = math.sin(animationTime * 2) * 0.5 + 0.5
+    glowIntensity = math.sin(animationTime * 1.5) * 0.3 + 0.7
+    
+    -- Load images if not loaded
+    if not imagesLoaded then
+        loadImages()
+    end
+    
+    -- Update my session ID periodically
+    if currentTime - lastUpdateTime > 2.0 then
+        local newSessionId = getMySessionId()
+        if newSessionId and newSessionId ~= mySessionId then
+            if debugMode then
+                ac.debug("SafetyRating", "Session ID updated: " .. tostring(mySessionId) .. " -> " .. tostring(newSessionId))
+            end
+            mySessionId = newSessionId
+        end
+        lastUpdateTime = currentTime
+    end
+    
+    -- Update connection status
+    local timeSinceLastData = currentTime - lastDataUpdate
+    if timeSinceLastData > 15 then
+        connectionStatus = "No data received"
+    elseif timeSinceLastData > 10 then
+        connectionStatus = "Connection unstable"
+    else
+        connectionStatus = "Connected"
+    end
+    
+    -- Debug output every 5 seconds
+    if debugMode and (currentTime - lastUpdateTime > 5.0) then
+        local dataCount = getTableSize(safetyRatingData)
+        local inputDataCount = getTableSize(serverInputModes)
+        ac.debug("SafetyRating", string.format("Status: %s | Data entries: %d | Input modes: %d | Events: %d | My Session: %s | Fonts: %s", 
+            connectionStatus, dataCount, inputDataCount, messageCount, tostring(mySessionId), tostring(fontsLoaded)))
+    end
+end
+
+function getTableSize(t)
+    local count = 0
+    for _ in pairs(t) do count = count + 1 end
+    return count
+end
+
+function parseSafetyRatingUpdate(data)
+    local success, result = pcall(function()
+        if not data or data == "" then 
+            return false
+        end
+        
+        if debugMode then
+            ac.debug("SafetyRating", "Parsing OnlineEvent data (length " .. string.len(data) .. "): '" .. data .. "'")
+        end
+        
+        local newData = {}
+        local playerCount = 0
+        
+        local playerEntries = {}
+        if string.find(data, ";") then
+            for playerData in string.gmatch(data, "([^;]+)") do
+                table.insert(playerEntries, playerData)
+            end
+        else
+            table.insert(playerEntries, data)
+        end
+        
+        for i, playerData in ipairs(playerEntries) do
+            local parts = {}
+            for part in string.gmatch(playerData, "([^:]+)") do
+                table.insert(parts, part)
+            end
+            
+            if #parts >= 7 then
+                local sessionId = tonumber(parts[1])
+                local rating = tonumber(parts[2])
+                local distance = tonumber(parts[3])
+                local penalty = tonumber(parts[4])
+                local rank = parts[5]
+                local color = parts[6]
+                local playerName = parts[7]
+                
+                if sessionId and rating and distance and penalty and rank and color and playerName then
+                    newData[sessionId] = {
+                        rating = rating,
+                        distance = distance,
+                        penalty = penalty,
+                        rank = rank,
+                        color = color,
+                        name = playerName,
+                        lastUpdate = os.clock()
+                    }
+                    
+                    playerCount = playerCount + 1
+                end
+            end
+        end
+        
+        if playerCount > 0 then
+            safetyRatingData = newData
+            return true
+        end
+        
+        return false
+    end)
+    
+    if not success then
+        ac.debug("SafetyRating", "ERROR parsing safety rating data: " .. tostring(result))
+        return false
+    end
+    
+    return result
+end
+
+-- Function to format kilometers driven with enhanced styling
+function formatKilometers(distance)
+    if not distance then return "0km" end
+    local km = distance / 1000
+    if km >= 1000 then
+        return string.format("%.1fk km", km / 1000)
+    elseif km >= 10 then
+        return string.format("%.0f km", km)
+    else
+        return string.format("%.1f km", km)
+    end
+end
+
+function getPlayerName(sessionId)
+    return "Player " .. tostring(sessionId)
+end
+
+-- Enhanced UI drawing function with rectangle effects
+function script.drawUI()
+    if not uiVisible then return end
+    
+    local dt = ac.getUiState().dt
+    local screenSize = ui.windowSize()
+    
+    -- Mouse handling for UI positioning
+    local mousePos = ui.mousePos()
+    local mouseLeft = ui.mouseDown(0)
+    local mouseRight = ui.mouseDown(1)
+    local mouseWheel = ui.mouseWheel()
+    
+    -- Calculate UI positions with scaling and offset - using consistent width
+    local scaledWidth = uiConfig.width * uiScale  -- All elements use same width
+    local scaledHeaderHeight = uiConfig.headerHeight * uiScale
+    local scaledLocalPlayerHeight = uiConfig.localPlayerHeight * uiScale
+    local scaledTopPlayersHeaderHeight = uiConfig.topPlayersHeaderHeight * uiScale
+    local scaledPlayerEntryHeight = uiConfig.playerEntryHeight * uiScale
+    local scaledSpacing = uiConfig.spacing * uiScale
+    
+    local totalUIWidth = scaledWidth
+    local totalUIHeight = scaledHeaderHeight + scaledSpacing + 
+                         scaledLocalPlayerHeight + scaledSpacing + 
+                         scaledTopPlayersHeaderHeight + scaledSpacing + 
+                         (scaledPlayerEntryHeight * 5) + (scaledSpacing * 4)  -- 5 players with 4 spaces between them
+    
+    local startX = 20 + uiPosition.x
+    local startY = 80 + uiPosition.y
+    
+    -- Define draggable area using consistent width
+    local uiAreaMin = vec2(startX, startY)
+    local uiAreaMax = vec2(startX + totalUIWidth, startY + totalUIHeight)
+    
+    -- Check if mouse is over the UI area
+    local mouseOverUI = mousePos.x >= uiAreaMin.x and mousePos.x <= uiAreaMax.x and
+                       mousePos.y >= uiAreaMin.y and mousePos.y <= uiAreaMax.y
+    
+    -- Mouse handling logic
+    if mouseLeft and mouseOverUI and not isDragging and not isScalingMode then
+        isDragging = true
+        dragStartPos = mousePos
+        dragStartUiPos = vec2(uiPosition.x, uiPosition.y)
+        showUIHint = true
+        uiHintTimer = uiHintDuration
+    elseif isDragging and mouseLeft then
+        local delta = vec2(mousePos.x - dragStartPos.x, mousePos.y - dragStartPos.y)
+        local newX = dragStartUiPos.x + delta.x
+        local newY = dragStartUiPos.y + delta.y
+        
+        local minVisibleX = -startX + 50
+        local maxVisibleX = screenSize.x - totalUIWidth - 50
+        local minVisibleY = -startY + 50
+        local maxVisibleY = screenSize.y - totalUIHeight - 50
+        
+        uiPosition.x = math.max(minVisibleX, math.min(maxVisibleX, newX))
+        uiPosition.y = math.max(minVisibleY, math.min(maxVisibleY, newY))
+    elseif isDragging then
+        isDragging = false
+        saveUISettings()
+    end
+    
+    if mouseRight and mouseOverUI then
+        rightClickTimer = rightClickTimer + dt
+        if rightClickTimer > 0.2 and not rightClickHeld then
+            rightClickHeld = true
+            isScalingMode = not isScalingMode
+            showUIHint = true
+            uiHintTimer = uiHintDuration
+        end
+    else
+        rightClickTimer = 0
+        rightClickHeld = false
+    end
+    
+    if not mouseLeft and isDragging then
+        isDragging = false
+        saveUISettings()
+    end
+    
+    if showUIHint then
+        uiHintTimer = uiHintTimer - dt
+        if uiHintTimer <= 0 then
+            showUIHint = false
+        end
+    end
+    
+    if isScalingMode then
+        if mouseWheel ~= 0 then
+            local newScale = uiScale + (mouseWheel * 0.1)
+            uiScale = math.max(minScale, math.min(maxScale, newScale))
+            saveUISettings()
+        end
+        
+        ui.setCursor(vec2(uiAreaMin.x, uiAreaMin.y - 30))
+        drawTextWithBerlinFont("🔧 UI Scaling Mode: " .. string.format("%.2f", uiScale) .. " (Mouse Wheel | Right-click to exit)", 
+            12 * uiScale, uiAreaMin.x, uiAreaMin.y - 30, colors.accent, colors.shadow)
+    end
+    
+    if showUIHint and not isScalingMode then
+        ui.setCursor(vec2(uiAreaMin.x, uiAreaMin.y - 25))
+        drawTextWithBerlinFont("✋ Drag to move | Right-click for scaling", 
+            11 * uiScale, uiAreaMin.x, uiAreaMin.y - 25, colors.textSecondary, colors.shadow)
+    end
+    
+    -- Draw the gorgeous enhanced rectangle safety rating UI
+    drawRectangleSafetyRatingUI(startX, startY)
+end
+
+function drawRectangleSafetyRatingUI(x, y)
+    local alpha = fadeAnimation
+    local currentY = y
+    
+    -- Draw Enhanced Header Section as Rectangle
+    currentY = drawRectangleHeaderSection(x, currentY, alpha)
+    currentY = currentY + uiConfig.spacing * uiScale
+    
+    -- Draw Local Player Section as Rectangle
+    currentY = drawLocalPlayerRectangle(x, currentY, alpha)
+    currentY = currentY + uiConfig.spacing * uiScale
+    
+    -- Draw Top Players Header as Rectangle
+    currentY = drawTopPlayersHeaderRectangle(x, currentY, alpha)
+    currentY = currentY + uiConfig.spacing * uiScale
+    
+    -- Draw Top Players List as Rectangles
+    drawTopPlayersRectangles(x, currentY, alpha)
+end
+
+-- Rectangle drawing functions that ensure PERFECT alignment
+function drawRectangleHeaderSection(x, y, alpha)
+    local scaledWidth = uiConfig.width * uiScale
+    local scaledHeight = uiConfig.headerHeight * uiScale
+    local scaledCornerRadius = uiConfig.cornerRadius * uiScale
+    
+    -- Draw background image first for the driver rating header
+    drawRectangleWithImage(x, y, scaledWidth, scaledHeight, "https://i.ibb.co/0y8t094w/black.png", rgbm(1.0, 1.0, 1.0, alpha * 0.5), scaledCornerRadius)
+    
+    -- Enhanced "DRIVER RATING" text - centered
+    local headerText = "DRIVER RATING"
+    local headerFontSize = (uiConfig.titleFontSize + 2) * uiScale
+    
+    drawCenteredTextInRectangle(x, y, scaledWidth, scaledHeight, headerText, headerFontSize, colors.text, 0)
+    
+    -- Calculate flag positions relative to centered text
+    local flagSize = 28 * uiScale
+    local flagHeight = 18 * uiScale
+    local flagY = y + (scaledHeight - flagHeight) / 2
+    local flagSpacing = 12 * uiScale
+    
+    local centerX = x + scaledWidth / 2
+    local textSize = measureHeaderTextWithBerlinFont(headerText, headerFontSize)
+    
+    -- Left flag position
+    local leftFlagX = centerX - textSize.x/2 - flagSize - flagSpacing
+    
+    -- Right flag position  
+    local rightFlagX = centerX + textSize.x/2 + flagSpacing
+    
+    -- Draw flags
+    if flagIcon then
+        ui.drawImage(flagIcon, vec2(leftFlagX, flagY), 
+                    vec2(leftFlagX + flagSize, flagY + flagHeight), rgbm(1, 1, 1, alpha))
+        ui.drawImage(flagIcon, vec2(rightFlagX, flagY), 
+                    vec2(rightFlagX + flagSize, flagY + flagHeight), rgbm(1, 1, 1, alpha))
+    end
+    
+    return y + scaledHeight
+end
+
+function drawLocalPlayerRectangle(x, y, alpha)
+    local scaledWidth = uiConfig.width * uiScale
+    local scaledHeight = uiConfig.localPlayerHeight * uiScale
+    local scaledCornerRadius = uiConfig.cornerRadius * uiScale
+    
+    -- Get current player data
+    local currentSessionId = getMySessionId()
+    local myData = safetyRatingData[currentSessionId]
+    
+    if not myData then
+        -- Draw waiting message rectangle (sharp edges)
+        drawAlignedRectangle(x, y, scaledWidth, scaledHeight, colors.transparentBlack, nil, 0, 2, scaledCornerRadius)
+        drawCenteredTextInRectangle(x, y, scaledWidth, scaledHeight, "⏳ Waiting for your data...", (uiConfig.fontSize + 1) * uiScale, colors.text, 0)
+        return y + scaledHeight
+    end
+    
+    -- Draw purple background image first (sharp edges)
+    drawRectangleWithImage(x, y, scaledWidth, scaledHeight, "https://i.ibb.co/spCxWSY4/new.png", rgbm(0.9, 0.95, 1.0, alpha * 0.8), scaledCornerRadius)
+    
+    -- Calculate separator position
+    local inputAreaWidth = 60 * uiScale
+    local separatorX = x + scaledWidth - inputAreaWidth
+    
+    -- Draw vertical separator line
+    ui.drawLine(vec2(separatorX, y), vec2(separatorX, y + scaledHeight), colors.separatorBlack, 2 * uiScale)
+    
+    -- Draw input area background (sharp edges)
+    ui.drawRectFilled(
+        vec2(separatorX, y), 
+        vec2(x + scaledWidth, y + scaledHeight), 
+        colors.separatorBlack, 
+        scaledCornerRadius
+    )
+    
+    -- Draw text in the main area (left of separator)
+    local nameText = "👤 " .. myData.name
+    local nameSize = measureTextWithBerlinFont(nameText, (uiConfig.fontSize + 1) * uiScale)
+    local nameX = x + (15 * uiScale)
+    local nameY = y + (scaledHeight / 2) - (nameSize.y / 2)
+    drawTextWithBerlinFont(nameText, (uiConfig.fontSize + 1) * uiScale, nameX, nameY, colors.text, colors.shadow)
+    
+    -- Draw rating data
+    local rankColor = getRankColor(myData.rank)
+    local kmText = formatKilometers(myData.distance)
+    local ratingText = string.format("(%s) %.2f • %s", myData.rank, myData.rating, kmText)
+    local ratingSize = measureTextWithBerlinFont(ratingText, uiConfig.fontSize * uiScale)
+    local ratingX = separatorX - ratingSize.x - (15 * uiScale)
+    local ratingY = y + (scaledHeight / 2) - (ratingSize.y / 2)
+    drawTextWithBerlinFont(ratingText, uiConfig.fontSize * uiScale, ratingX, ratingY, colors.text, colors.shadow)
+    
+    -- Draw input icon centered in the input area
+    local inputType = getInputType(currentSessionId)
+    local inputIconSize = 24 * uiScale
+    local inputCenterX = separatorX + inputAreaWidth / 2
+    local inputCenterY = y + scaledHeight / 2
+    local inputIconX = inputCenterX - inputIconSize / 2
+    local inputIconY = inputCenterY - inputIconSize / 2
+    drawInputIcon(inputType, inputIconX, inputIconY, inputIconSize, alpha)
+    
+    return y + scaledHeight
+end
+
+function drawTopPlayersHeaderRectangle(x, y, alpha)
+    local scaledWidth = uiConfig.width * uiScale
+    local scaledHeight = uiConfig.topPlayersHeaderHeight * uiScale
+    local scaledCornerRadius = uiConfig.cornerRadius * uiScale
+    
+    -- Draw top players header with same black background image as driver rating (sharp edges)
+    drawRectangleWithImage(x, y, scaledWidth, scaledHeight, "https://i.ibb.co/0y8t094w/black.png", rgbm(1.0, 1.0, 1.0, alpha * 0.8), scaledCornerRadius)
+    
+    -- Draw white text instead of blue
+    drawCenteredTextInRectangle(x, y, scaledWidth, scaledHeight, "🏆 TOP PLAYERS", (uiConfig.fontSize + 1) * uiScale, colors.text, 0)
+    
+    return y + scaledHeight
+end
+
+function drawTopPlayersRectangles(x, y, alpha)
+    local scaledWidth = uiConfig.width * uiScale
+    local scaledHeight = uiConfig.playerEntryHeight * uiScale
+    local scaledSpacing = uiConfig.spacing * uiScale
+    local scaledCornerRadius = uiConfig.cornerRadius * uiScale
+    
+    -- Get sorted players
+    local sortedPlayers = getSortedPlayers()
+    local maxDisplay = math.min(5, #sortedPlayers)
+    
+    local currentY = y
+    
+    for i = 1, maxDisplay do
+        local player = sortedPlayers[i]
+        local rankColor = getRankColor(player.rank)
+        
+        -- Draw purple background image first (sharp edges)
+        drawRectangleWithImage(x, currentY, scaledWidth, scaledHeight, "https://i.ibb.co/spCxWSY4/new.png", rgbm(0.7, 0.75, 0.9, alpha * 0.6), scaledCornerRadius)
+        
+        -- Calculate separator position
+        local inputAreaWidth = 60 * uiScale
+        local separatorX = x + scaledWidth - inputAreaWidth
+        
+        -- Draw vertical separator line
+        ui.drawLine(vec2(separatorX, currentY), vec2(separatorX, currentY + scaledHeight), colors.separatorBlack, 2 * uiScale)
+        
+        -- Draw input area background (sharp edges)
+        ui.drawRectFilled(
+            vec2(separatorX, currentY), 
+            vec2(x + scaledWidth, currentY + scaledHeight), 
+            colors.separatorBlack, 
+            scaledCornerRadius
+        )
+        
+        -- Draw position and player name
+        local displayName = truncateName(player.name, 16)
+        local positionText = string.format("%d. %s", i, displayName)
+        local positionSize = measureTextWithBerlinFont(positionText, uiConfig.fontSize * uiScale)
+        local positionX = x + (10 * uiScale)
+        local positionY = currentY + (scaledHeight / 2) - (positionSize.y / 2)
+        drawTextWithBerlinFont(positionText, uiConfig.fontSize * uiScale, positionX, positionY, colors.text, colors.shadow)
+        
+        -- Draw rating data
+        local kmText = formatKilometers(player.distance)
+        local ratingText = string.format("(%s) %.1f • %s", player.rank, player.rating, kmText)
+        local ratingSize = measureTextWithBerlinFont(ratingText, uiConfig.fontSize * uiScale)
+        local ratingX = separatorX - ratingSize.x - (15 * uiScale)
+        local ratingY = currentY + (scaledHeight / 2) - (ratingSize.y / 2)
+        drawTextWithBerlinFont(ratingText, uiConfig.fontSize * uiScale, ratingX, ratingY, colors.text, colors.shadow)
+        
+        -- Draw input icon
+        local inputType = getInputType(player.sessionId)
+        local inputIconSize = 20 * uiScale
+        local inputCenterX = separatorX + inputAreaWidth / 2
+        local inputCenterY = currentY + scaledHeight / 2
+        local inputIconX = inputCenterX - inputIconSize / 2
+        local inputIconY = inputCenterY - inputIconSize / 2
+        drawInputIcon(inputType, inputIconX, inputIconY, inputIconSize, alpha)
+        
+        currentY = currentY + scaledHeight + scaledSpacing
+    end
+end
+
+function getRankColor(rank)
+    return rankColors[rank] or rankColors.D
+end
+
+function truncateName(name, maxLength)
+    local nameStr = tostring(name or "Unknown")
+    
+    if string.len(nameStr) > maxLength then
+        return string.sub(nameStr, 1, maxLength - 3) .. "..."
+    end
+    return nameStr
+end
+
+function getSortedPlayers()
+    local players = {}
+    
+    for sessionId, data in pairs(safetyRatingData) do
+        local playerData = {
+            sessionId = sessionId,
+            rating = data.rating,
+            distance = data.distance,
+            penalty = data.penalty,
+            rank = data.rank,
+            color = data.color,
+            name = data.name
+        }
+        table.insert(players, playerData)
+    end
+    
+    table.sort(players, function(a, b)
+        return a.rating > b.rating
+    end)
+    
+    return players
+end
+
+function getAvailableSessionIds()
+    local ids = {}
+    for sessionId, _ in pairs(safetyRatingData) do
+        table.insert(ids, tostring(sessionId))
+    end
+    return ids
+end
+
+-- Input handling with enhanced feedback
+function script.keyDown(key)
+    if key == ui.Key.F9 then
+        uiVisible = not uiVisible
+        ac.debug("SafetyRating", "✨ Rectangle UI visibility: " .. tostring(uiVisible))
+    elseif key == ui.Key.F8 then
+        debugMode = not debugMode
+        ac.debug("SafetyRating", "🔧 Enhanced Debug mode: " .. tostring(debugMode))
+        if debugMode then
+            ac.debug("SafetyRating", "=== Sharp Rectangle Enhanced UI Debug Mode ===")
+            ac.debug("SafetyRating", "Status: " .. connectionStatus)
+            ac.debug("SafetyRating", "Data entries: " .. getTableSize(safetyRatingData))
+            ac.debug("SafetyRating", "Input modes tracked: " .. getTableSize(serverInputModes))
+            ac.debug("SafetyRating", "UI Position: " .. uiPosition.x .. ", " .. uiPosition.y)
+            ac.debug("SafetyRating", "UI Scale: " .. uiScale)
+            ac.debug("SafetyRating", "Images loaded: " .. tostring(imagesLoaded))
+            ac.debug("SafetyRating", "Fonts loaded: " .. tostring(fontsLoaded))
+            ac.debug("SafetyRating", "Enhanced Features: Sharp Rectangle UI, Berlin Sans FB font, custom backgrounds")
+            ac.debug("SafetyRating", "Controls: Drag UI to move, Right-click for scaling")
+        end
+    end
+end
+
+-- Enhanced initialization
+function script.prepare(dt)
+    ac.debug("SafetyRating", "=== ✨ SHARP-EDGED RECTANGLE Enhanced Safety Rating Client Started ===")
+    ac.debug("SafetyRating", "Version: Ultra-Enhanced Sharp Rectangle UI with Berlin Sans FB font and custom backgrounds")
+    ac.debug("SafetyRating", "Debug mode: " .. tostring(debugMode))
+    ac.debug("SafetyRating", "Font URL: " .. fontsURL)
+    
+    -- Load UI settings
+    loadUISettings()
+    
+    -- Initialize session ID
+    mySessionId = getMySessionId()
+    ac.debug("SafetyRating", "Initial session ID: " .. tostring(mySessionId))
+    
+    lastUpdateTime = os.clock()
+    lastMessageTime = os.clock()
+    lastDataUpdate = 0
+    lastBroadcastReceived = 0
+    messageCount = 0
+    animationTime = 0
+    
+    -- Load enhanced images
+    loadImages()
+    
+    -- Reset UI interaction variables
+    isDragging = false
+    isScalingMode = false
+    rightClickTimer = 0
+    rightClickHeld = false
+    showUIHint = false
+    uiHintTimer = 0
+    
+    ac.debug("SafetyRating", "🎨 Sharp rectangle client initialized with enhanced visual effects!")
+    ac.debug("SafetyRating", "✨ Features: Sharp Rectangle UI, Berlin Sans FB font loading, custom backgrounds, input icons")
+    ac.debug("SafetyRating", "🎮 Controls: Drag to move, Right-click for scaling, F8=Debug, F9=Toggle")
+    
+    return true
+end
+
+-- Enhanced test function
+function loadTestData()
+    local testSessionId = getMySessionId() or 0
+    safetyRatingData = {
+        [testSessionId] = {rating = 8.5, distance = 2100, penalty = 1.2, rank = "S", color = "#00FF00", name = "You", lastUpdate = os.clock()},
+        [1] = {rating = 7.2, distance = 8950, penalty = 2.8, rank = "A", color = "#80FF00", name = "TestDriver1", lastUpdate = os.clock()},
+        [2] = {rating = 6.1, distance = 15670, penalty = 4.9, rank = "B", color = "#FFFF00", name = "TestDriver2", lastUpdate = os.clock()},
+        [3] = {rating = 5.3, distance = 9200, penalty = 6.1, rank = "C", color = "#FF8000", name = "TestDriver3", lastUpdate = os.clock()},
+        [4] = {rating = 4.8, distance = 7800, penalty = 8.2, rank = "C", color = "#FF8000", name = "TestDriver4", lastUpdate = os.clock()}
+    }
+    serverInputModes = {
+        [testSessionId] = "wheel",
+        [1] = "gamepad",
+        [2] = "keyboard", 
+        [3] = "wheel",
+        [4] = "gamepad"
+    }
+    lastDataUpdate = os.clock()
+    lastBroadcastReceived = os.clock()
+    ac.debug("SafetyRating", "🎨 Loaded test data with sharp rectangle visual effects!")
+end
+
+-- Uncomment to test with rectangle visual effects
+-- setTimeout(loadTestData, 5000)
