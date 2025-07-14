@@ -1,0 +1,587 @@
+local driverData = {}
+local nametagCanvas = {}
+local numberOfCars = 0
+local globaldt = 0.016
+local carsInRangeMultiplierTarget = 1
+local carsInRangeMultiplierCurrent = 1
+local fontsURL = 'https://www.dl.dropboxusercontent.com/scl/fi/a0gzgsszxo2cdio16b1vf/Fonts.zip?rlkey=hw7vcxlgx61sfpv6i2zdvdwof'
+local fontmed, fontreg, fontoptie
+
+-- Steam Avatar Storage
+local steamAvatars = {}
+local avatarCache = {}
+local avatarDownloadQueue = {}
+local isDownloadingAvatars = false
+
+-- Avatar configuration
+local avatarConfig = {
+    enabled = true,
+    showInNear = true,
+    showInMid = true,
+    showInFar = false, -- Usually too small to be useful
+    nearSize = 64,
+    midSize = 48,
+    farSize = 32,
+    cornerRadius = 8,
+    defaultDisplayTime = 300, -- 5 minutes default if not specified
+    fallbackToFlag = true -- Show flag if no avatar available
+}
+
+-- load font resource from remote
+web.loadRemoteAssets(fontsURL, function(err, folder)
+    local fontpathmed = folder .. "/Fonts/Poppins-Medium.ttf"
+    local fontpathreg = folder .. "/Fonts/Poppins-Regular.ttf"
+    local fontpathoptie = folder .. "/Fonts/OPTIEdgarBold-Extended.ttf"
+
+    fontmed = string.format("Poppins:%s", fontpathmed)
+    fontreg = string.format("Poppins:%s", fontpathreg)
+    fontoptie = string.format("OPTIEdgarBold:%s", fontpathoptie)
+end)
+
+for i = 0, 1000 do
+    if not ac.getCar(i) then
+        break
+    end
+    numberOfCars = numberOfCars + 1
+    driverData[i] = {}
+    nametagCanvas[i] = {
+        far = ui.ExtraCanvas(vec2(1000, 200), 1, render.AntialiasingMode.ExtraSharpCMAA),
+        farFadeCurrent = 0,
+        farFadeTarget = 0,
+        mid = ui.ExtraCanvas(vec2(1000, 200), 1, render.AntialiasingMode.ExtraSharpCMAA),
+        midFadeCurrent = 0,
+        midFadeTarget = 0,
+        near = ui.ExtraCanvas(vec2(1000, 200), 1, render.AntialiasingMode.ExtraSharpCMAA),
+        nearFadeCurrent = 0,
+        nearFadeTarget = 0,
+    }
+end
+
+local tagsDistance = 300
+
+-- Steam Avatar Functions
+local function parseSteamAvatarMessage(message)
+    if string.sub(message, 1, 14) == "$STEAM_AVATAR$" then
+        local parts = {}
+        local start = 15
+        for i = 1, 4 do
+            local endPos = string.find(message, "$", start)
+            if endPos then
+                table.insert(parts, string.sub(message, start, endPos - 1))
+                start = endPos + 1
+            else
+                table.insert(parts, string.sub(message, start))
+                break
+            end
+        end
+        
+        if #parts >= 3 then
+            return {
+                steamId = parts[1],
+                playerName = parts[2],
+                avatarUrl = parts[3],
+                displayTime = tonumber(parts[4]) or avatarConfig.defaultDisplayTime
+            }
+        end
+    elseif string.sub(message, 1, 21) == "$STEAM_AVATAR_REMOVE$" then
+        local parts = {}
+        local start = 22
+        for i = 1, 2 do
+            local endPos = string.find(message, "$", start)
+            if endPos then
+                table.insert(parts, string.sub(message, start, endPos - 1))
+                start = endPos + 1
+            else
+                table.insert(parts, string.sub(message, start))
+                break
+            end
+        end
+        
+        if #parts >= 1 then
+            return {
+                remove = true,
+                steamId = parts[1],
+                playerName = parts[2] or "Unknown"
+            }
+        end
+    end
+    return nil
+end
+
+local function findCarIndexBySteamId(steamId)
+    for i = 0, numberOfCars - 1 do
+        local car = ac.getCar(i)
+        if car and tostring(ac.getDriverGuid(i)) == steamId then
+            return i
+        end
+    end
+    return nil
+end
+
+local function findCarIndexByPlayerName(playerName)
+    for i = 0, numberOfCars - 1 do
+        local driverName = ac.getDriverName(i)
+        if driverName and driverName == playerName then
+            return i
+        end
+    end
+    return nil
+end
+
+local function downloadAvatar(steamId, avatarUrl)
+    if avatarCache[steamId] then
+        return -- Already cached
+    end
+    
+    if avatarDownloadQueue[steamId] then
+        return -- Already in queue
+    end
+    
+    avatarDownloadQueue[steamId] = avatarUrl
+    ac.log("Steam Avatar: Queued avatar download for Steam ID: " .. steamId .. " -> " .. avatarUrl)
+end
+
+local function processAvatarDownloadQueue()
+    if isDownloadingAvatars then
+        return
+    end
+    
+    local steamId, avatarUrl = next(avatarDownloadQueue)
+    if not steamId then
+        return
+    end
+    
+    isDownloadingAvatars = true
+    avatarDownloadQueue[steamId] = nil
+    
+    ac.log("Steam Avatar: Starting download for Steam ID: " .. steamId .. " -> " .. avatarUrl)
+    
+    web.get(avatarUrl, function(err, response)
+        isDownloadingAvatars = false
+        
+        if err then
+            ac.log("Steam Avatar: Download failed for Steam ID: " .. steamId .. " - " .. tostring(err))
+            return
+        end
+        
+        if response and response.body then
+            -- Create a temporary file path for the avatar
+            local tempPath = "temp_avatars/avatar_" .. steamId .. ".jpg"
+            
+            -- Try to save and load the image
+            local success = pcall(function()
+                avatarCache[steamId] = {
+                    url = avatarUrl,
+                    data = response.body,
+                    downloadedAt = os.time(),
+                    tempPath = tempPath
+                }
+                ac.log("Steam Avatar: Successfully cached avatar for Steam ID: " .. steamId)
+            end)
+            
+            if not success then
+                ac.log("Steam Avatar: Failed to cache avatar for Steam ID: " .. steamId)
+            end
+        else
+            ac.log("Steam Avatar: Invalid response for Steam ID: " .. steamId)
+        end
+    end)
+end
+
+-- Enhanced flag/avatar function
+local function flagAvatarFunction(level)
+    local flagExtraHeight = 0
+    local separatorExtraHeight = 30
+    local carIndex = carData.index
+    
+    if tagsMode ~= "Race" then
+        flagExtraHeight = flagExtraHeight + 50
+        separatorExtraHeight = separatorExtraHeight + 50
+    end
+    if not ac.getSim().isOnlineRace then
+        flagExtraHeight = flagExtraHeight + 30
+    end
+
+    ui.dwriteTextAligned("", 28, ui.Alignment.Center, ui.Alignment.Center, vec2(1000, 20 + separatorExtraHeight), false, rgb(1, 1, 1))
+    
+    -- Try to get Steam ID using different methods
+    local steamId = nil
+    local success, result = pcall(function() return ac.getDriverGuid(carIndex) end)
+    if success and result then
+        steamId = tostring(result)
+    else
+        -- Fallback: try to find by player name
+        local driverName = ac.getDriverName(carIndex)
+        if driverName then
+            for sid, avatarInfo in pairs(steamAvatars) do
+                if avatarInfo.playerName == driverName then
+                    steamId = sid
+                    break
+                end
+            end
+        end
+    end
+    
+    local hasAvatar = false
+    
+    -- Try to show Steam avatar if available and enabled
+    if avatarConfig.enabled and steamId and steamAvatars[steamId] and avatarCache[steamId] then
+        local showAvatar = false
+        local avatarSize = avatarConfig.farSize
+        
+        if level == 1 and avatarConfig.showInNear then
+            showAvatar = true
+            avatarSize = avatarConfig.nearSize
+        elseif level == 2 and avatarConfig.showInMid then
+            showAvatar = true
+            avatarSize = avatarConfig.midSize
+        elseif level == 3 and avatarConfig.showInFar then
+            showAvatar = true
+            avatarSize = avatarConfig.farSize
+        end
+        
+        if showAvatar then
+            -- Calculate avatar position (centered where flag would be)
+            local avatarX = 500 - (avatarSize / 2)
+            local avatarY = 10 + flagExtraHeight - 5
+            
+            -- Try to draw the avatar using the cached URL
+            local avatarData = avatarCache[steamId]
+            if avatarData and avatarData.url then
+                -- Draw rounded rectangle background
+                ui.drawRectFilled(
+                    vec2(avatarX - 2, avatarY - 2), 
+                    vec2(avatarX + avatarSize + 2, avatarY + avatarSize + 2), 
+                    rgb(0.2, 0.2, 0.2), 
+                    avatarConfig.cornerRadius + 1
+                )
+                
+                -- Try to draw the avatar image
+                local drawSuccess = pcall(function()
+                    -- Try different methods for loading the image
+                    if avatarData.tempPath then
+                        ui.drawImage(
+                            avatarData.tempPath,
+                            vec2(avatarX, avatarY),
+                            vec2(avatarX + avatarSize, avatarY + avatarSize),
+                            rgb(1, 1, 1),
+                            avatarConfig.cornerRadius
+                        )
+                    else
+                        -- Fallback to URL (may not work in all CSP versions)
+                        ui.drawImage(
+                            avatarData.url,
+                            vec2(avatarX, avatarY),
+                            vec2(avatarX + avatarSize, avatarY + avatarSize),
+                            rgb(1, 1, 1),
+                            avatarConfig.cornerRadius
+                        )
+                    end
+                end)
+                
+                if drawSuccess then
+                    hasAvatar = true
+                    
+                    -- Draw border
+                    ui.drawRect(
+                        vec2(avatarX, avatarY), 
+                        vec2(avatarX + avatarSize, avatarY + avatarSize), 
+                        rgb(1, 1, 1), 
+                        avatarConfig.cornerRadius, 
+                        1
+                    )
+                    
+                    -- Debug output
+                    if level == 1 then
+                        ac.debug("Steam Avatar", "Showing avatar for " .. (steamAvatars[steamId].playerName or "unknown"))
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Fallback to flag if no avatar or avatar loading failed
+    if not hasAvatar and (not avatarConfig.enabled or avatarConfig.fallbackToFlag) then
+        if level == 1 and driverData[carIndex].nationCode ~= "" then
+            ui.drawImage("/content/gui/NationFlags/" .. driverData[carIndex].nationCode .. ".png",
+                vec2(477, 10 + flagExtraHeight), vec2(525, 58 + flagExtraHeight), rgb(1, 1, 1))
+        end
+    end
+end
+
+local function racePositionFunction(level)
+    if tagsMode == "Race" then
+        ui.dwriteTextAligned(" " .. driverData[carData.index].racePosition .. ".", 50, ui.Alignment.Center,
+            ui.Alignment.Center, vec2(1000, 50), false, rgb(1, 1, 1))
+    end
+end
+
+local function driverNameFunction(level)
+    if level <= 2 then
+        ui.dwriteTextAligned(driverData[carData.index].driverName, 25, ui.Alignment.Center, ui.Alignment.Center,
+            vec2(1000, 30), false, rgb(1, 1, 1))
+    else
+        ui.dwriteTextAligned("", 25, ui.Alignment.Center, ui.Alignment.Center, vec2(1000, 30), false, rgb(1, 1, 1))
+    end
+end
+
+local function pingFunction(level)
+    -- Draw Driver Ping
+    local pingColor = rgb(1, 1, 1)
+    local connectionEmoji = "🌐"
+    if driverData[carData.index].ping > 200 then
+        connectionEmoji = "⚠️"
+        pingColor = rgb(1, 0, 0)
+    elseif driverData[carData.index].ping > 165 then
+        connectionEmoji = "⚠️"
+        pingColor = rgb(1, 0.25, 0)
+    elseif driverData[carData.index].ping > 135 then
+        connectionEmoji = "⚠️"
+        pingColor = rgb(1, 0.5, 0)
+    elseif driverData[carData.index].ping > 100 then
+        connectionEmoji = "⚠️"
+        pingColor = rgb(1, 0.75, 0)
+    elseif driverData[carData.index].ping > 80 then
+        pingColor = rgb(1, 1, 0)
+    elseif driverData[carData.index].ping > 50 then
+        pingColor = rgb(1, 1, 0.5)
+    end
+    if ac.getSim().isOnlineRace then
+        ui.dwriteTextAligned(connectionEmoji .. driverData[carData.index].ping .. "ms", 25, ui.Alignment.Center,
+            ui.Alignment.Center, vec2(1000, 30), false, pingColor)
+    else
+        ui.dwriteTextAligned("", 25, ui.Alignment.Center, ui.Alignment.Center, vec2(1000, 30), false, pingColor)
+    end
+end
+
+local function renderCanvasNear()
+    carData = CurrentlyProcessedCar
+    nametagCanvas[carData.index].near:clear()
+    ui.pushDWriteFont(fontoptie)
+    ui.beginOutline()
+
+    flagAvatarFunction(1) -- Enhanced function with avatar support
+    pingFunction(1)
+    racePositionFunction(1)
+    driverNameFunction(1)
+
+    ui.endOutline(0, 10)
+    ui.popDWriteFont()
+end
+
+local function renderCanvasMid()
+    carData = CurrentlyProcessedCar
+    nametagCanvas[carData.index].mid:clear()
+    ui.pushDWriteFont(fontmed)
+    ui.beginOutline()
+
+    flagAvatarFunction(2) -- Enhanced function with avatar support
+    pingFunction(2)
+    racePositionFunction(2)
+    driverNameFunction(2)
+
+    ui.endOutline(0, 10)
+    ui.popDWriteFont()
+end
+
+local function renderCanvasFar()
+    carData = CurrentlyProcessedCar
+    nametagCanvas[carData.index].far:clear()
+    ui.pushDWriteFont(fontreg)
+    ui.beginOutline()
+
+    flagAvatarFunction(3) -- Enhanced function with avatar support
+    pingFunction(3)
+    racePositionFunction(3)
+    driverNameFunction(3)
+
+    ui.endOutline(0, 10)
+    ui.popDWriteFont()
+end
+
+local function renderDriverNameTag(carData)
+    CurrentlyProcessedCar = carData
+    driverData[carData.index].racePosition = carData.racePosition
+    driverData[carData.index].driverName = ac.getDriverName(carData.index)
+    driverData[carData.index].ping = carData.ping
+    driverData[carData.index].nationCode = ac.getDriverNationCode(carData.index)
+    driverData[carData.index].distanceToCamera = (carData.distanceToCamera / 2) * (ac.getSim().cameraFOV / 27)
+    driverData[carData.index].timeSinceLastCanvasUpdate = 0
+    if driverData[carData.index].lastCanvasUpdate then
+        driverData[carData.index].lastCanvasUpdate = driverData[carData.index].lastCanvasUpdate + math.random()
+    else
+        driverData[carData.index].lastCanvasUpdate = 0
+    end
+    if driverData[carData.index].lastCanvasUpdate > 2 * numberOfCars and driverData[carData.index].distanceToCamera < tagsDistance then
+        nametagCanvas[carData.index].far:update(renderCanvasFar)
+        nametagCanvas[carData.index].mid:update(renderCanvasMid)
+        nametagCanvas[carData.index].near:update(renderCanvasNear)
+        driverData[carData.index].lastCanvasUpdate = 0
+    end
+
+    if driverData[carData.index].distanceToCamera < tagsDistance / carsInRangeMultiplierCurrent then
+        sizeScale = math.clamp(
+        (((tagsDistance / carsInRangeMultiplierCurrent) - (driverData[carData.index].distanceToCamera)) / (tagsDistance / carsInRangeMultiplierCurrent)) ^
+        0.9, 0.249, 1)
+        if nametagCanvas[carData.index].farFadeCurrent > 0 then
+            ui.drawImage(nametagCanvas[carData.index].far,
+                vec2(2000 - ((sizeScale * 0.5 + 0.5) * 2000), 800 - ((sizeScale * 0.5 + 0.5) * 800)),
+                vec2(((sizeScale * 0.5 + 0.5) * 2000), 400), rgbm(1, 1, 1, nametagCanvas[carData.index].farFadeCurrent))
+        end
+        if nametagCanvas[carData.index].midFadeCurrent > 0 then
+            ui.drawImage(nametagCanvas[carData.index].mid,
+                vec2(2000 - ((sizeScale * 0.5 + 0.5) * 2000), 800 - ((sizeScale * 0.5 + 0.5) * 800)),
+                vec2(((sizeScale * 0.5 + 0.5) * 2000), 400), rgbm(1, 1, 1, nametagCanvas[carData.index].midFadeCurrent))
+        end
+        if nametagCanvas[carData.index].nearFadeCurrent > 0 then
+            ui.drawImage(nametagCanvas[carData.index].near,
+                vec2(2000 - ((sizeScale * 0.5 + 0.5) * 2000), 800 - ((sizeScale * 0.5 + 0.5) * 800)),
+                vec2(((sizeScale * 0.5 + 0.5) * 2000), 400), rgbm(1, 1, 1, nametagCanvas[carData.index].nearFadeCurrent))
+        end
+
+        -- globaldt
+        if sizeScale >= 0.8 then
+            nametagCanvas[carData.index].nearFadeTarget = 1
+        else
+            nametagCanvas[carData.index].nearFadeTarget = 0
+        end
+        if sizeScale >= 0.55 and sizeScale <= 0.8 then
+            nametagCanvas[carData.index].midFadeTarget = 1
+        else
+            nametagCanvas[carData.index].midFadeTarget = 0
+        end
+        if sizeScale >= 0.25 and sizeScale <= 0.55 then
+            nametagCanvas[carData.index].farFadeTarget = 1
+        else
+            nametagCanvas[carData.index].farFadeTarget = 0
+        end
+
+        if nametagCanvas[carData.index].nearFadeTarget > nametagCanvas[carData.index].nearFadeCurrent then
+            nametagCanvas[carData.index].nearFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].nearFadeCurrent + globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        elseif nametagCanvas[carData.index].nearFadeTarget < nametagCanvas[carData.index].nearFadeCurrent then
+            nametagCanvas[carData.index].nearFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].nearFadeCurrent - globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        end
+
+        if nametagCanvas[carData.index].midFadeTarget > nametagCanvas[carData.index].midFadeCurrent then
+            nametagCanvas[carData.index].midFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].midFadeCurrent + globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        elseif nametagCanvas[carData.index].midFadeTarget < nametagCanvas[carData.index].midFadeCurrent then
+            nametagCanvas[carData.index].midFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].midFadeCurrent - globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        end
+
+        if nametagCanvas[carData.index].farFadeTarget > nametagCanvas[carData.index].farFadeCurrent then
+            nametagCanvas[carData.index].farFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].farFadeCurrent + globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        elseif nametagCanvas[carData.index].farFadeTarget < nametagCanvas[carData.index].farFadeCurrent then
+            nametagCanvas[carData.index].farFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].farFadeCurrent - globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        end
+    else
+        nametagCanvas[carData.index].nearFadeTarget = 0
+        nametagCanvas[carData.index].midFadeTarget = 0
+        nametagCanvas[carData.index].farFadeTarget = 0
+        nametagCanvas[carData.index].nearFadeCurrent = 0
+        nametagCanvas[carData.index].midFadeCurrent = 0
+        nametagCanvas[carData.index].farFadeCurrent = 0
+    end
+end
+
+local tagsMode = "Race"
+
+-- Chat message handler for Steam avatars
+function script.onChatMessage(message, sessionId, connectedCars)
+    if not avatarConfig.enabled then
+        return
+    end
+    
+    local avatarData = parseSteamAvatarMessage(message)
+    if not avatarData then
+        return
+    end
+    
+    if avatarData.remove then
+        -- Handle avatar removal
+        ac.log("Steam Avatar: Removing avatar for Steam ID: " .. avatarData.steamId .. " (" .. avatarData.playerName .. ")")
+        
+        steamAvatars[avatarData.steamId] = nil
+        avatarCache[avatarData.steamId] = nil
+        avatarDownloadQueue[avatarData.steamId] = nil
+        
+        ac.log("Steam Avatar: Avatar removed for " .. avatarData.playerName)
+        return
+    end
+    
+    -- Handle new avatar
+    ac.log("Steam Avatar: Received avatar data for " .. avatarData.playerName .. " (Steam ID: " .. avatarData.steamId .. ") -> " .. avatarData.avatarUrl)
+    
+    -- Store avatar information
+    steamAvatars[avatarData.steamId] = {
+        playerName = avatarData.playerName,
+        avatarUrl = avatarData.avatarUrl,
+        displayTime = avatarData.displayTime,
+        receivedAt = os.time()
+    }
+    
+    -- Queue avatar for download
+    downloadAvatar(avatarData.steamId, avatarData.avatarUrl)
+    
+    -- Also try to map by player name as fallback
+    local carIndex = findCarIndexByPlayerName(avatarData.playerName)
+    if carIndex then
+        ac.debug("Steam Avatar", "Mapped " .. avatarData.playerName .. " to car index " .. carIndex)
+    end
+    
+    ac.log("Steam Avatar: Stored avatar info for " .. avatarData.playerName .. ", queued for download")
+end
+
+function script.update(dt)
+    globaldt = dt
+
+    -- Process avatar download queue
+    processAvatarDownloadQueue()
+    
+    -- Clean up expired avatars
+    local currentTime = os.time()
+    for steamId, avatarInfo in pairs(steamAvatars) do
+        if avatarInfo.displayTime > 0 and (currentTime - avatarInfo.receivedAt) > avatarInfo.displayTime then
+            ac.log("Steam Avatar: Cleaning up expired avatar for " .. avatarInfo.playerName)
+            steamAvatars[steamId] = nil
+            avatarCache[steamId] = nil
+        end
+    end
+
+    carsInRangeMultiplierTarget = 0
+    for i = 0, 1000 do
+        if not ac.getCar(i) then
+            break
+        end
+        if i ~= ac.getSim().focusedCar and ac.getCar(i).isConnected and ac.getCar(i).distanceToCamera < tagsDistance then
+            carsInRangeMultiplierTarget = carsInRangeMultiplierTarget +
+            math.clamp(((tagsDistance - (ac.getCar(i).distanceToCamera)) / tagsDistance) ^ 0.9, 0, 1)
+        end
+    end
+    carsInRangeMultiplierTarget = math.max(1, carsInRangeMultiplierTarget / 2)
+    ac.debug("carsInRangeMultiplierTarget", carsInRangeMultiplierTarget)
+
+    if carsInRangeMultiplierTarget > carsInRangeMultiplierCurrent then
+        carsInRangeMultiplierCurrent = carsInRangeMultiplierCurrent + (dt / 10)
+    elseif carsInRangeMultiplierTarget < carsInRangeMultiplierCurrent then
+        carsInRangeMultiplierCurrent = carsInRangeMultiplierCurrent - (dt / 5)
+    end
+    carsInRangeMultiplierCurrent = math.clamp(carsInRangeMultiplierCurrent, 1, 7.5)
+    ac.debug("carsInRangeMultiplierCurrent", carsInRangeMultiplierCurrent)
+
+    if tagsMode == "Race" and ac.getSim().raceSessionType ~= 3 then
+        tagsMode = "Practice"
+    end
+
+    if tagsMode == "Practice" and ac.getSim().raceSessionType == 3 then
+        tagsMode = "Race"
+    end
+end
+
+ui.onDriverNameTag(true, rgbm(1, 1, 1, 0), renderDriverNameTag,
+    { mainSize = 1, mirrorSize = 4, distanceMultiplier = 5, tagSize = vec2(2000, 400) })
