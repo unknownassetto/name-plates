@@ -1,0 +1,297 @@
+local driverData = {}
+local nametagCanvas = {}
+local numberOfCars = 0
+local globaldt = 0.016
+local carsInRangeMultiplierTarget = 1
+local carsInRangeMultiplierCurrent = 1
+local fontsURL = 'https://www.dropbox.com/scl/fi/n1kpquqhxpbw0ltk9fmjn/Fonts-2.zip?rlkey=2uhx9nocs28bng4g1eyxdeupb&st=5x8incg8&dl=1'
+local fontmed, fontreg, fontoptie
+
+-- load font resource from remote
+web.loadRemoteAssets(fontsURL, function(err, folder)
+    local fontpathmed = folder .. "/Fonts/Poppins-Medium.ttf"
+    local fontpathreg = folder .. "/Fonts/Poppins-Regular.ttf"
+    local fontpathoptie = folder .. "/Fonts/OPTIEdgarBold-Extended.ttf"
+
+    fontmed = string.format("Poppins:%s", fontpathmed)
+    fontreg = string.format("Poppins:%s", fontpathreg)
+    fontoptie = string.format("OPTIEdgarBold:%s", fontpathoptie)
+end)
+
+
+for i = 0, 1000 do
+    if not ac.getCar(i) then
+        break
+    end
+    numberOfCars = numberOfCars + 1
+    driverData[i] = {}
+    nametagCanvas[i] = {
+        far = ui.ExtraCanvas(vec2(1000, 200), 1, render.AntialiasingMode.ExtraSharpCMAA),
+        farFadeCurrent = 0,
+        farFadeTarget = 0,
+        mid = ui.ExtraCanvas(vec2(1000, 200), 1, render.AntialiasingMode.ExtraSharpCMAA),
+        midFadeCurrent = 0,
+        midFadeTarget = 0,
+        near = ui.ExtraCanvas(vec2(1000, 200), 1, render.AntialiasingMode.ExtraSharpCMAA),
+        nearFadeCurrent = 0,
+        nearFadeTarget = 0,
+    }
+end
+
+local tagsDistance = 300
+
+local function flagFunction(level)
+    local flagExtraHeight = 0
+    local separatorExtraHeight = 30
+    if tagsMode ~= "Race" then
+        flagExtraHeight = flagExtraHeight + 50
+        separatorExtraHeight = separatorExtraHeight + 50
+    end
+    if not ac.getSim().isOnlineRace then
+        flagExtraHeight = flagExtraHeight + 30
+    end
+
+
+    ui.dwriteTextAligned("", 28, ui.Alignment.Center, ui.Alignment.Center, vec2(1000, 20 + separatorExtraHeight), false,
+        rgb(1, 1, 1))
+    if level == 1 and driverData[carData.index].nationCode ~= "" then
+        ui.drawImage("/content/gui/NationFlags/" .. driverData[carData.index].nationCode .. ".png",
+            vec2(477, 10 + flagExtraHeight), vec2(525, 58 + flagExtraHeight), rgb(1, 1, 1))
+    end
+end
+
+local function racePositionFunction(level)
+    if tagsMode == "Race" then
+        ui.dwriteTextAligned(" " .. driverData[carData.index].racePosition .. ".", 50, ui.Alignment.Center,
+            ui.Alignment.Center, vec2(1000, 50), false, rgb(1, 1, 1))
+    end
+end
+
+local function driverNameFunction(level)
+    if level <= 2 then
+        ui.dwriteTextAligned(driverData[carData.index].driverName, 25, ui.Alignment.Center, ui.Alignment.Center,
+            vec2(1000, 30), false, rgb(1, 1, 1))
+    else
+        ui.dwriteTextAligned("", 25, ui.Alignment.Center, ui.Alignment.Center, vec2(1000, 30), false, rgb(1, 1, 1))
+    end
+end
+
+local function pingFunction(level)
+    -- Draw Driver Ping
+    local pingColor = rgb(1, 1, 1)
+    local connectionEmoji = "🌐"
+    if driverData[carData.index].ping > 200 then
+        connectionEmoji = "⚠️"
+        pingColor = rgb(1, 0, 0)
+    elseif driverData[carData.index].ping > 165 then
+        connectionEmoji = "⚠️"
+        pingColor = rgb(1, 0.25, 0)
+    elseif driverData[carData.index].ping > 135 then
+        connectionEmoji = "⚠️"
+        pingColor = rgb(1, 0.5, 0)
+    elseif driverData[carData.index].ping > 100 then
+        connectionEmoji = "⚠️"
+        pingColor = rgb(1, 0.75, 0)
+    elseif driverData[carData.index].ping > 80 then
+        pingColor = rgb(1, 1, 0)
+    elseif driverData[carData.index].ping > 50 then
+        pingColor = rgb(1, 1, 0.5)
+    end
+    if ac.getSim().isOnlineRace then
+        ui.dwriteTextAligned(connectionEmoji .. driverData[carData.index].ping .. "ms", 25, ui.Alignment.Center,
+            ui.Alignment.Center, vec2(1000, 30), false, pingColor)
+    else
+        ui.dwriteTextAligned("", 25, ui.Alignment.Center, ui.Alignment.Center, vec2(1000, 30), false, pingColor)
+    end
+end
+
+--'OPTIEdgarBold:\\Fonts;Weight=Medium'
+local function renderCanvasNear()
+    carData = CurrentlyProcessedCar
+    nametagCanvas[carData.index].near:clear()
+    ui.pushDWriteFont(fontoptie)
+    ui.beginOutline()
+
+    flagFunction(1)
+    pingFunction(1)
+    racePositionFunction(1)
+    driverNameFunction(1)
+
+    ui.endOutline(0, 10)
+    ui.popDWriteFont()
+end
+
+local function renderCanvasMid()
+    carData = CurrentlyProcessedCar
+    nametagCanvas[carData.index].mid:clear()
+    ui.pushDWriteFont(fontmed)
+    ui.beginOutline()
+
+    flagFunction(2)
+    pingFunction(2)
+    racePositionFunction(2)
+    driverNameFunction(2)
+
+    ui.endOutline(0, 10)
+    ui.popDWriteFont()
+end
+
+local function renderCanvasFar()
+    carData = CurrentlyProcessedCar
+    nametagCanvas[carData.index].far:clear()
+    ui.pushDWriteFont(fontreg)
+    ui.beginOutline()
+
+    flagFunction(3)
+    pingFunction(3)
+    racePositionFunction(3)
+    driverNameFunction(3)
+
+    ui.endOutline(0, 10)
+    ui.popDWriteFont()
+end
+
+local function renderDriverNameTag(carData)
+    CurrentlyProcessedCar = carData
+    driverData[carData.index].racePosition = carData.racePosition
+    driverData[carData.index].driverName = ac.getDriverName(carData.index)
+    driverData[carData.index].ping = carData.ping
+    driverData[carData.index].nationCode = ac.getDriverNationCode(carData.index)
+    driverData[carData.index].distanceToCamera = (carData.distanceToCamera / 2) * (ac.getSim().cameraFOV / 27)
+    driverData[carData.index].timeSinceLastCanvasUpdate = 0
+    if driverData[carData.index].lastCanvasUpdate then
+        driverData[carData.index].lastCanvasUpdate = driverData[carData.index].lastCanvasUpdate + math.random()
+    else
+        driverData[carData.index].lastCanvasUpdate = 0
+    end
+    if driverData[carData.index].lastCanvasUpdate > 2 * numberOfCars and driverData[carData.index].distanceToCamera < tagsDistance then
+        nametagCanvas[carData.index].far:update(renderCanvasFar)
+        nametagCanvas[carData.index].mid:update(renderCanvasMid)
+        nametagCanvas[carData.index].near:update(renderCanvasNear)
+        driverData[carData.index].lastCanvasUpdate = 0
+    end
+
+    if driverData[carData.index].distanceToCamera < tagsDistance / carsInRangeMultiplierCurrent then
+        sizeScale = math.clamp(
+        (((tagsDistance / carsInRangeMultiplierCurrent) - (driverData[carData.index].distanceToCamera)) / (tagsDistance / carsInRangeMultiplierCurrent)) ^
+        0.9, 0.249, 1)
+        if nametagCanvas[carData.index].farFadeCurrent > 0 then
+            ui.drawImage(nametagCanvas[carData.index].far,
+                vec2(2000 - ((sizeScale * 0.5 + 0.5) * 2000), 800 - ((sizeScale * 0.5 + 0.5) * 800)),
+                vec2(((sizeScale * 0.5 + 0.5) * 2000), 400), rgbm(1, 1, 1, nametagCanvas[carData.index].farFadeCurrent))
+        end
+        if nametagCanvas[carData.index].midFadeCurrent > 0 then
+            ui.drawImage(nametagCanvas[carData.index].mid,
+                vec2(2000 - ((sizeScale * 0.5 + 0.5) * 2000), 800 - ((sizeScale * 0.5 + 0.5) * 800)),
+                vec2(((sizeScale * 0.5 + 0.5) * 2000), 400), rgbm(1, 1, 1, nametagCanvas[carData.index].midFadeCurrent))
+        end
+        if nametagCanvas[carData.index].nearFadeCurrent > 0 then
+            ui.drawImage(nametagCanvas[carData.index].near,
+                vec2(2000 - ((sizeScale * 0.5 + 0.5) * 2000), 800 - ((sizeScale * 0.5 + 0.5) * 800)),
+                vec2(((sizeScale * 0.5 + 0.5) * 2000), 400), rgbm(1, 1, 1, nametagCanvas[carData.index].nearFadeCurrent))
+        end
+
+        -- globaldt
+        if sizeScale >= 0.8 then
+            nametagCanvas[carData.index].nearFadeTarget = 1
+        else
+            nametagCanvas[carData.index].nearFadeTarget = 0
+        end
+        if sizeScale >= 0.55 and sizeScale <= 0.8 then
+            nametagCanvas[carData.index].midFadeTarget = 1
+        else
+            nametagCanvas[carData.index].midFadeTarget = 0
+        end
+        if sizeScale >= 0.25 and sizeScale <= 0.55 then
+            nametagCanvas[carData.index].farFadeTarget = 1
+        else
+            nametagCanvas[carData.index].farFadeTarget = 0
+        end
+
+        if nametagCanvas[carData.index].nearFadeTarget > nametagCanvas[carData.index].nearFadeCurrent then
+            nametagCanvas[carData.index].nearFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].nearFadeCurrent + globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        elseif nametagCanvas[carData.index].nearFadeTarget < nametagCanvas[carData.index].nearFadeCurrent then
+            nametagCanvas[carData.index].nearFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].nearFadeCurrent - globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        end
+
+        if nametagCanvas[carData.index].midFadeTarget > nametagCanvas[carData.index].midFadeCurrent then
+            nametagCanvas[carData.index].midFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].midFadeCurrent + globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        elseif nametagCanvas[carData.index].midFadeTarget < nametagCanvas[carData.index].midFadeCurrent then
+            nametagCanvas[carData.index].midFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].midFadeCurrent - globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        end
+
+        if nametagCanvas[carData.index].farFadeTarget > nametagCanvas[carData.index].farFadeCurrent then
+            nametagCanvas[carData.index].farFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].farFadeCurrent + globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        elseif nametagCanvas[carData.index].farFadeTarget < nametagCanvas[carData.index].farFadeCurrent then
+            nametagCanvas[carData.index].farFadeCurrent = math.clamp(
+            nametagCanvas[carData.index].farFadeCurrent - globaldt * carsInRangeMultiplierCurrent, 0, 1)
+        end
+    else
+        nametagCanvas[carData.index].nearFadeTarget = 0
+        nametagCanvas[carData.index].midFadeTarget = 0
+        nametagCanvas[carData.index].farFadeTarget = 0
+        nametagCanvas[carData.index].nearFadeCurrent = 0
+        nametagCanvas[carData.index].midFadeCurrent = 0
+        nametagCanvas[carData.index].farFadeCurrent = 0
+    end
+
+
+
+    --ui.drawImage(nametagCanvas[carData.index], vec2(0, 0), vec2(2000,400))
+end
+
+local tagsMode = "Race"
+function script.update(dt)
+    globaldt = dt
+
+    carsInRangeMultiplierTarget = 0
+    for i = 0, 1000 do
+        if not ac.getCar(i) then
+            break
+        end
+        if i ~= ac.getSim().focusedCar and ac.getCar(i).isConnected and ac.getCar(i).distanceToCamera < tagsDistance then
+            carsInRangeMultiplierTarget = carsInRangeMultiplierTarget +
+            math.clamp(((tagsDistance - (ac.getCar(i).distanceToCamera)) / tagsDistance) ^ 0.9, 0, 1)
+        end
+    end
+    carsInRangeMultiplierTarget = math.max(1, carsInRangeMultiplierTarget / 2)
+    ac.debug("carsInRangeMultiplierTarget", carsInRangeMultiplierTarget)
+
+    if carsInRangeMultiplierTarget > carsInRangeMultiplierCurrent then
+        carsInRangeMultiplierCurrent = carsInRangeMultiplierCurrent + (dt / 10)
+    elseif carsInRangeMultiplierTarget < carsInRangeMultiplierCurrent then
+        carsInRangeMultiplierCurrent = carsInRangeMultiplierCurrent - (dt / 5)
+    end
+    carsInRangeMultiplierCurrent = math.clamp(carsInRangeMultiplierCurrent, 1, 7.5)
+    ac.debug("carsInRangeMultiplierCurrent", carsInRangeMultiplierCurrent)
+
+    if tagsMode == "Race" and ac.getSim().raceSessionType ~= 3 then
+        tagsMode = "Practice"
+    end
+
+    if tagsMode == "Practice" and ac.getSim().raceSessionType == 3 then
+        tagsMode = "Race"
+    end
+
+
+
+    -- for i = 0,1000 do
+    --     if not ac.getCar(i) then
+    --         break
+    --     end
+    --     local car = ac.getCar(i)
+    --
+    --     ac.debug("Car" .. i .. "BodyDamage", {car.damage[0]/60, car.damage[1]/60})
+    --     ac.debug("Car" .. i .. "SuspensionDamage", {car.wheels[0].suspensionDamage, car.wheels[1].suspensionDamage, car.wheels[2].suspensionDamage, car.wheels[3].suspensionDamage})
+    --     ac.debug("Car" .. i .. "TyreFlatSpotDamage", {car.wheels[0].tyreFlatSpot, car.wheels[1].tyreFlatSpot, car.wheels[2].tyreFlatSpot, car.wheels[3].tyreFlatSpot})
+    --     ac.debug("Car" .. i .. "EngineAndTransmissionDamage", {1  - car.engineLifeLeft / 1000, car.gearboxDamage})
+    -- end
+end
+
+ui.onDriverNameTag(true, rgbm(1, 1, 1, 0), renderDriverNameTag,
+    { mainSize = 1, mirrorSize = 4, distanceMultiplier = 5, tagSize = vec2(2000, 400) })
